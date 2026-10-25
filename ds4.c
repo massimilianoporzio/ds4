@@ -444,11 +444,7 @@ static bool ds4_backend_supports_ssd_streaming(ds4_backend backend) {
 
 static bool ds4_backend_supports_streaming_auto_cache(ds4_backend backend) {
     if (backend == DS4_BACKEND_METAL) return true;
-#ifdef DS4_ROCM_BUILD
     if (backend == DS4_BACKEND_CUDA) return true;
-#else
-    (void)backend;
-#endif
     return false;
 }
 
@@ -22964,6 +22960,11 @@ static uint32_t metal_graph_streaming_expert_preload_count(
          * thousands of preads into shared buffers and trip the system watchdog
          * before decode begins. GLM demand-fills by default; explicit CLI
          * preload counts and auto-preload env caps bypass that default. */
+#if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
+        const char *cuda_env = getenv("DS4_CUDA_STREAMING_EXPERT_AUTO_PRELOAD_CAP");
+        if (!cuda_env || !cuda_env[0]) return 0;
+        env = cuda_env;
+#endif
         uint32_t cap = 4096;
         if (env && env[0]) {
             char *end = NULL;
@@ -69200,6 +69201,11 @@ static bool ds4_engine_configure_streaming_auto_cache(ds4_engine *e, int ctx_siz
             e->prefill_chunk, true);
     /* GLM's larger fixed tensors and streaming windows need more margin. */
     if (DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_GLM_DSA) cache_percent = 86;
+#elif !defined(DS4_ROCM_BUILD)
+    (void)ctx_size;
+    /* On discrete CUDA GPUs, VRAM is dedicated and cuda_stream_selected_cache_begin_load
+     * enforces live cudaMemGetInfo headroom for static arenas and compact prefill. */
+    if (e->backend == DS4_BACKEND_CUDA) cache_percent = 95;
 #else
     (void)ctx_size;
 #endif
@@ -69499,7 +69505,12 @@ static bool ds4_engine_configure_streaming_cache_budget(ds4_engine *e) {
     uint64_t total_cache_bytes = e->ssd_streaming_cache_bytes;
     uint64_t prefill_headroom_bytes = 0;
     uint64_t budget_after_prefill_headroom = total_cache_bytes;
-    if (total_cache_bytes != 0) {
+#if !defined(__APPLE__) && !defined(DS4_ROCM_BUILD)
+    const bool cuda_live_vram_clamp = (e->backend == DS4_BACKEND_CUDA);
+#else
+    const bool cuda_live_vram_clamp = false;
+#endif
+    if (total_cache_bytes != 0 && !cuda_live_vram_clamp) {
         if (!ds4_streaming_prefill_headroom_bytes(&e->weights,
                                                   &prefill_headroom_bytes)) {
             fprintf(stderr,

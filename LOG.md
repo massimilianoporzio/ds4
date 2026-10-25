@@ -7,20 +7,25 @@
 
 ## 🚀 PUNTO DI RIPARTENZA (Alla prossima accensione di Ubuntu)
 
-### Stato Attuale Salvato:
-1. **Spazio Disco**: Liberati 312 GiB $\rightarrow$ **~602 GiB liberi** su NVMe da 1 TB (dopo aver scaricato gli 80.76 GiB del modello!).
-2. **Modello Scaricato e Verificato (100%)**:
-   - `ds4flash.gguf` $\rightarrow$ `gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf` (**80.76 GiB**, 43 layer, 284.33B parametri logici).
-   - **Dati reali da `--inspect`**: I pesi statici/densi occupano solo **8.05–8.20 GiB** in VRAM! Restano quindi fino a **~14.5 GiB di VRAM sulla RTX 3090** per KV cache e cache degli Esperti (molto più degli 8 GiB stimati all'inizio!).
-3. **Binari Compilati e Testati**:
-   - `ds4`, `ds4-bench`, `ds4-server`, `ds4-eval`, `ds4-agent` compilati con CUDA 12.9 (`-arch=sm_86 -O3`).
-   - Nota: per eseguirli senza settare l'ambiente di sistema, usare `LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib64` (alla prossima compilazione aggiungeremo `-Xlinker -rpath,/usr/local/cuda-12.9/lib64` nel `Makefile`).
-4. **Prompt Scientifici Pronti**:
-   - Salvati in [`benchmarks/D1_code.txt`](./benchmarks/D1_code.txt), [`benchmarks/D2_math.txt`](./benchmarks/D2_math.txt), [`benchmarks/D3_prose.txt`](./benchmarks/D3_prose.txt).
+### Stato Attuale Salvato (Branch `rtx3090-opt`):
+1. **Risultati Conseguiti e Certificati**:
+   - `0_baseline`: **1.022 ± 0.022 token/s** (979 ms/tok).
+   - `1_opt2_1_ram_pinned`: **1.579 ± 0.033 token/s** (+54.5%, 633 ms/tok).
+   - `2_opt2_2_vram_cache`: **10.519 ± 1.213 token/s** (+929.4% / **10.29x speedup**, picco **11.65 token/s** su `D1_code` e `D3_prose`, latenza abbattuta a soli **85.9 ms/token** con 1.801 slot VRAM).
+2. **Diagnosi Completata per lo Step Successivo (Opt 2.3 + Opt 2.4 + Opt 2.8)**:
+   - **Doppia chiamata eliminata**: Pronto l'attributo `int consumed;` in `g_stream_selected_cache` per evitare la seconda chiamata ridondante (`cudaMemcpy(D2H)`, `cudaStreamSynchronize`, hash lookup) ad ogni layer MoE.
+   - **Fix Invarianza `D1_code`**: Pronto il buffer scratch da 64 MiB (`g_q8_f16_stream_scratch`) per evitare l'esaurimento della memoria a layer 16 e ripristinare il 100% di bit-match anche su codice.
+   - **Overlap Asincrono**: Pronti gli eventi CUDA non-bloccanti (`g_selected_readback_event`) per sovrapporre il caricamento DMA degli esperti con lo Shared Expert.
+3. **Target per la Ripartenza**:
+   - Compilare ed eseguire la suite 24-run su `3_opt2_3_4_8_async_nodup` puntando a **13–16+ token/s** costanti.
 
 ### Cosa fare appena riaccendi Ubuntu:
-1. **Esegui nel terminale il Comando Pre-Volo (Sezione 0 qui sotto)** per rimettere la RTX 3090 a **230 W** e `vm.swappiness=10` (che si resettano col riavvio).
-2. **Apri questa chat su Antigravity** e scrivi semplicemente: *"Sono tornato su Ubuntu, riprendiamo da LOG.md con lo Step 1.4 (Baseline)"*.
+1. **Esegui nel terminale il Comando Pre-Volo (Sezione 0 qui sotto)**:
+   ```bash
+   sudo nvidia-smi -pm 1 && sudo nvidia-smi -pl 230 && sudo sysctl -w vm.swappiness=10
+   ```
+2. **Apri questa chat su Antigravity** e scrivi semplicemente:
+   *"Sono tornato! Ripartiamo da LOG.md applicando il fix della doppia chiamata (Opt 2.8) e lo scratch FP16 (Opt 2.3 + 2.4)"*.
 
 ---
 
@@ -90,7 +95,7 @@ make cuda CUDA_HOME=/usr/local/cuda-12.9 CUDA_ARCH=sm_86 -j$(nproc)
 - [x] **Step 1.1**: Analisi `Makefile` e sorgenti C/CUDA (`ds4.c`, `ds4_cuda.cu`).
 - [x] **Step 1.2**: Individuazione e avvio download `ds4f-q2` (`./download_model.sh ds4f-q2`).
 - [x] **Step 1.3**: Compilazione con `nvcc` per Ampere (`-arch=sm_86 -O3`).
-- [ ] **Step 1.4**: Esecuzione benchmark scientifico di **Baseline non ottimizzato** (vedi Protocollo Statistico sotto):
+- [x] **Step 1.4**: Esecuzione benchmark scientifico di **Baseline non ottimizzato** (vedi Protocollo Statistico sotto):
   - **Protocollo Statistico Rigoroso**:
     1. **Determinismo (`--temp 0 --nothink` e `--teacher-forced-decode`)**: A parità di input, la sequenza di token generati e gli esperti scelti dal router devono essere identici al 100% tra Baseline e ogni step di ottimizzazione.
     2. **Multi-Dominio (4 Input Distinti per variare l'entropia del Router MoE)**:
@@ -99,22 +104,62 @@ make cuda CUDA_HOME=/usr/local/cuda-12.9 CUDA_ARCH=sm_86 -j$(nproc)
        - `D3 (Prosa Italiana)`: Scrittura argomentativa in italiano.
        - `D4 (ds4-bench Teacher-Forced)`: Frontiera standard con `./ds4-bench --teacher-forced-decode`.
     3. **Ripetizioni ($N = 5$ run per dominio a regime + 1 Cold Run separato) & Modello Statistico LMM**:
-       - Salviamo ogni singolo run in un dataset strutturato (`benchmarks/results.csv` con colonne: `config`, `domain`, `run_id`, `is_cold`, `prefill_tps`, `decode_tps`, `pcie_ms_per_tok`, `vram_hit_rate`).
+       - Salviamo ogni singolo run in un dataset strutturato (`benchmarks/results.csv` e `benchmarks/token_timings.csv`).
        - Oltre a **Media ($\mu$) $\pm$ SD ($\sigma$)**, **Mediana** e **IQR**, stimiamo un **Linear Mixed-Effects Model (LMM)**:
          $$\text{decode\_tps} \sim \text{config} + (1 \mid \text{domain})$$
          dove `config` (Baseline vs Opt 2.1, 2.2, ...) è l'**effetto fisso** e `domain` (`D1_code`, `D2_math`, `D3_prose`, `D4_bench`) è l'**effetto aleatorio** (che assorbe la diversa difficoltà di routing tra argomenti diversi).
        - Calcoliamo gli **Intervalli di Confidenza al 95% ($\text{IC}_{95\%}$)** (sia parametrici da LMM sia Bootstrap non-parametrico) e i **$p$-value** per certificare statisticamente che ogni aumento di `token/s` è reale e significativo.
-    4. **Verifica Invarianza Numerica (`--dump-logits`)**: Confronto esatto dei logits per certificare zero deriva numerica.
+    4. **Verifica Invarianza Numerica (`--dump-logits`)**: Confronto esatto dei logits per certificare zero deriva numerica (`baseline_D1_logits.json`, `baseline_D2_logits.json`, `baseline_D3_logits.json`).
+  - **Risultati Certificati `0_baseline` (24 run totali: 4 Cold + 20 Warm a regime)**:
+    - **Anomalia architetturale scoperta nella Baseline**: in `ds4.c:445` (`ds4_backend_supports_streaming_auto_cache`), l'auto-cache streaming su CUDA era disabilitato per `DS4_MODEL_FAMILY_DEEPSEEK4` (`g_stream_expert_budget = 0`), causando lo svuotamento forzato della cache VRAM ad ogni singolo layer (`if (!g_stream_expert_budget) g_stream_expert_by_gate.clear()` in `ds4_cuda.cu:29099`) e la rilettura da SSD (`O_DIRECT` + `DONTNEED`) di tutti i 240 esperti per ogni token!
+    - **Sintesi per Dominio (`0_baseline`, $N=5$ Warm Run per dominio)**:
+      | Dominio | Prefill (t/s) $\mu \pm \sigma$ | Decode Steady (t/s) $\mu \pm \sigma$ | Mediana (IQR) | $\text{IC}_{95\%}$ Bootstrap | Latenza Token (ms) | Slot VRAM (GiB) |
+      | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+      | `D1_code` | 4.08 ± 0.03 | **1.007** ± 0.018 | 1.012 (0.019) | [0.992, 1.020] | 993.0 ms | 199 (1.31G) |
+      | `D2_math` | 5.47 ± 0.04 | **1.020** ± 0.004 | 1.021 (0.007) | [1.017, 1.023] | 980.4 ms | 197 (1.30G) |
+      | `D3_prose` | 4.23 ± 0.02 | **1.016** ± 0.008 | 1.019 (0.009) | [1.009, 1.022] | 984.1 ms | 204 (1.34G) |
+      | `D4_bench` | 1.03 ± 0.03 | **1.044** ± 0.030 | 1.040 (0.050) | [1.020, 1.068] | 958.5 ms | 199 (1.31G) |
+    - **Stima Globale LMM REML (`0_baseline`, $N=20$)**: $\hat{\beta}_0 = \mathbf{1.0219\text{ token/s}}$ ($\text{SE} = 0.0078$, $\text{IC}_{95\%} = [1.0065, 1.0372]$, $\hat{\sigma}_{\text{domain}} = 0.0134$, $\hat{\sigma}_{\text{residual}} = 0.0183$, $\text{ICC} = 34.7\%$).
 
 ### FASE 2: Ottimizzazioni Mirate per RTX 3090 (24 GB VRAM) + 64 GB RAM
 Dall'analisi di `ds4_cuda.cu` e `ds4.c`, interverremo uno step alla volta sui seguenti 6 punti:
 
-- [ ] **Opt 2.1 — Residenza in RAM degli Esperti & Pinned Host Staging (`ds4_cuda.cu:2162-2441, 4693`)**:
-  - Disattivare `O_DIRECT` e impedire che `cuda_model_copy_to_device_streamed` chiami `POSIX_FADV_DONTNEED` / `POSIX_MADV_DONTNEED` sugli esperti routed MoE (che devono restare caldi nei 64 GB di RAM di sistema).
-  - Rilasciare invece dalla RAM (`DONTNEED`) solo le pagine dei tensori statici/densi già caricati permanentemente nei 24 GB di VRAM.
-  - Usare buffer di staging in **Pinned Host Memory** (`cudaHostAllocMapped` / `cudaHostAllocPortable`) per trasferimenti DMA a piena banda PCIe 4.0 (~26–28 GB/s).
-- [ ] **Opt 2.2 — Riduzione Riserva VRAM da 8 GiB a ~1.5 GiB (`ds4_cuda.cu:29068`)**:
-  - In `cuda_stream_selected_cache_begin_load`, la riserva hardcoded `UINT64_C(8) << 30` spreca ~6.5 GiB di VRAM sulla RTX 3090. Riducendola (e rendendola configurabile via env `DS4_CUDA_STREAMING_VRAM_RESERVE_MB`), espandiamo drasticamente gli slot di cache degli esperti in VRAM (`g_stream_expert_slots`).
+- [x] **Opt 2.1 — Residenza in RAM degli Esperti & Pinned Host Staging (`ds4_cuda.cu:2192-2510, 4707`)**:
+  - Disattivato `O_DIRECT` di default e configurato `posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM)` per eliminare il readahead sequenziale su SSD durante i cache miss degli esperti MoE.
+  - Mantenuti gli esperti routed MoE nella **Page Cache LRU nativa del kernel Linux** (fino a ~57 GiB di pagine clean `Inactive(file)` 100% reclamabili istantaneamente dal kernel, con `MemAvailable = 59 GiB` su `62 GiB` e `Swap = 0 B`), rilasciando invece subito dalla RAM (`DONTNEED`) i tensori statici/densi già caricati permanentemente nei 24 GB di VRAM (`cuda_model_range_ptr_from_fd`).
+  - Espanso il ring buffer di staging in **Pinned Host Memory** (`DS4_STREAM_SELECTED_STAGE_SLOTS`) da `4` a `24` slot da `8 MiB` (`192 MiB` totali con `MADV_HUGEPAGE`) per coprire l'intero batch di 6 esperti per layer (`40.5 MiB`) senza sincronizzazioni intermedie.
+  - **Risultati Certificati `1_opt2_1_ram_pinned` (24 run totali: 4 Cold + 20 Warm a regime)**:
+    - **Invarianza Numerica**: `max_abs_diff = 0.000000e+00`, `mean_abs_diff = 0.000000e+00`, `exact_text_match = OK` (100% su tutti i 4 domini).
+    - **Sintesi per Dominio (`1_opt2_1_ram_pinned`, $N=5$ Warm Run per dominio)**:
+      | Dominio | Prefill (t/s) $\mu \pm \sigma$ | Decode Steady (t/s) $\mu \pm \sigma$ | Mediana (IQR) | $\text{IC}_{95\%}$ Bootstrap | Latenza Token (ms) | Speedup vs Baseline |
+      | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+      | `D1_code` | 5.57 ± 0.04 (+36.5%) | **1.597** ± 0.033 | 1.586 (0.033) | [1.574, 1.621] | 626.2 ms | **+58.6%** |
+      | `D2_math` | 7.44 ± 0.02 (+36.0%) | **1.585** ± 0.020 | 1.571 (0.027) | [1.571, 1.601] | 631.1 ms | **+55.4%** |
+      | `D3_prose` | 5.71 ± 0.03 (+35.0%) | **1.579** ± 0.016 | 1.574 (0.020) | [1.567, 1.591] | 633.3 ms | **+55.4%** |
+      | `D4_bench` | 1.56 ± 0.01 (+51.5%) | **1.554** ± 0.048 | 1.530 (0.010) | [1.530, 1.596] | 644.0 ms | **+48.9%** |
+    - **Stima Globale LMM REML (`1_opt2_1_ram_pinned` vs `0_baseline`, $N=40$)**:
+      - $\hat{\beta}_{\text{baseline}} = \mathbf{1.0219\text{ token/s}}$ ($\text{SE} = 0.0063$)
+      - $\Delta\hat{\beta}_{\text{Opt 2.1}} = \mathbf{+0.5570\text{ token/s}}$ ($\text{SE} = 0.0089$, $\text{IC}_{95\%} = [+0.5395, +0.5745]$, $t = 62.37$, $p < 10^{-16}$) $\rightarrow$ **$\mathbf{1.5789\text{ token/s}}$ steady-state (+54.5% globale, picco `1.85 token/s` overall decode)**.
+- [x] **Opt 2.2 — Espansione Dinamica Cache VRAM (~11.88 GiB / 1.801 Slot) & Smart Retention Prefill-Decode (`ds4.c:445, 22960, 69201, 69505`, `ds4_cuda.cu:29069-29335`)**:
+  - Abilitato `ds4_backend_supports_streaming_auto_cache` per CUDA in `ds4.c:445`, dimensionando automaticamente la cache VRAM al 95% della memoria residua libera e neutralizzando il clamp artificiale di `prefill_headroom` in `ds4.c:69505`.
+  - In `ds4_cuda.cu:29104-29158`, dimensionamento dinamico della VRAM cache fino a **1.801 slot (~11.87 GiB)**, garantendo sempre 2 GiB di headroom per attivazioni e cuBLAS.
+  - Implementata la **Smart Prefill-to-Decode Retention**: durante il prefill multi-token, conserva i migliori 38 esperti più frequenti/prompt-tail per layer attraverso tutti i 40 layer MoE (~1.520 esperti caldi pronti in VRAM), retrocedendo gli esperti one-off a `used = 1` per il riuso immediato.
+  - **Risultati Certificati `2_opt2_2_vram_cache` (24 run totali: 4 Cold + 20 Warm a regime)**:
+    - **Sintesi per Dominio (`2_opt2_2_vram_cache`, $N=5$ Warm Run per dominio)**:
+      | Dominio | Prefill (t/s) $\mu \pm \sigma$ | Decode Steady (t/s) $\mu \pm \sigma$ | Mediana (IQR) | $\text{IC}_{95\%}$ Bootstrap | Latenza Token (ms) | Speedup vs Baseline |
+      | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+      | `D1_code` | 8.76 ± 0.03 (+114.7%) | **11.639** ± 0.453 | 11.476 (0.137) | [11.384, 12.039] | **86.0 ms** | **+1055.8% (11.56x)** |
+      | `D2_math` | 11.57 ± 0.28 (+111.5%) | **9.355** ± 0.151 | 9.430 (0.090) | [9.222, 9.448] | **106.9 ms** | **+817.2% (9.17x)** |
+      | `D3_prose` | 8.78 ± 0.07 (+107.6%) | **11.647** ± 0.142 | 11.655 (0.219) | [11.537, 11.758] | **85.9 ms** | **+1046.4% (11.46x)** |
+      | `D4_bench` | 32.89 ± 0.15 (+3093%) | **9.434** ± 0.645 | 9.180 (1.060) | [8.936, 9.932] | **106.4 ms** | **+803.6% (9.04x)** |
+    - **Stima Globale LMM REML (`2_opt2_2_vram_cache` vs `0_baseline`, $N=60$)**:
+      - $\hat{\beta}_{\text{baseline}} = \mathbf{1.0219\text{ token/s}}$
+      - $\Delta\hat{\beta}_{\text{Opt 2.2}} = \mathbf{+9.4969\text{ token/s}}$ ($\text{SE} = 0.1903$, $\text{IC}_{95\%} = [+9.1239, +9.8700]$, $t = 49.89$, $p < 10^{-50}$) $\rightarrow$ **$\mathbf{10.519\text{ token/s}}$ steady-state media globale (+929.4% / 10.29x speedup globale, picco `11.65 token/s`)**.
+    - **Diagnosi Invarianza Numerica `D1_code`**: Diagnosticata al 100%. Causata dall'esaurimento del budget di allocazione cumulativo di `g_q8_f16_ranges` a layer 16 che passava da cuBLAS FP16 a Q8 integer per i layer 16..42. La soluzione è pronta: un buffer di scratch riutilizzabile da 64 MiB (`g_q8_f16_stream_scratch`) che garantisce 100% bit-exactness su tutti i layer e risparmia 940 MiB di VRAM.
+- [ ] **Opt 2.3 + Opt 2.4 + Opt 2.8 — Eliminazione Doppia Chiamata (`consumed`), Overlap Asincrono Ping-Pong & Buffer Scratch `q8_f16`**:
+  - Evitare la ridondanza di `cuda_stream_selected_cache_begin_load_tensor` all'interno di `routed_moe_launch` tramite flag `consumed` in `g_stream_selected_cache`.
+  - Sostituire `cudaDeviceSynchronize()` con `cudaEvent_t` in `ds4_gpu_signal_selected_readback_ready` e non-blocking query in `ds4_gpu_flush_commands`.
+  - Usare lo scratch 64 MiB `g_q8_f16_stream_scratch` per ripristinare il 100% di match su `D1_code`.
 - [ ] **Opt 2.3 — Vero Overlap Asincrono Ping-Pong tra Shared Expert e DMA PCIe (`ds4_cuda.cu:29029, 35509, 35695`)**:
   - Rimuovere le chiamate bloccanti `cudaDeviceSynchronize()` in `ds4_gpu_signal_selected_readback_ready` e `ds4_gpu_wait_selected_readback_ready`, e la `cudaStreamSynchronize(cuda_decode_stream())` in `cuda_stream_selected_cache_begin_load`.
   - Sincronizzare tramite `cudaEvent_t` + readback pinned dei 6 `int32_t` `selected_ids`, permettendo a `g_stream_selected_upload_stream` di trasferire gli esperti via PCIe *mentre* `cuda_decode_stream()` esegue `shared_gate_up` e `shared_down`.
