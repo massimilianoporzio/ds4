@@ -226,7 +226,30 @@ Come stabilire il margine di equivalenza $\Delta$ in modo scientifico e non arbi
      $$H_0: \frac{\lambda_{\text{opt}}}{\lambda_{\text{base}}} \ge 1 + \delta \quad \text{vs} \quad H_1: 1 - \delta < \frac{\lambda_{\text{opt}}}{\lambda_{\text{base}}} < 1 + \delta$$
    - Il margine $\delta$ è calcolato analiticamente in funzione del volume $N$ del testo, fondando la tolleranza sulla fisica del calcolo stocastico.
 
-### Budget Prestazionale Stimato (Target: $\ge$ 8–12 token/s)
+## 6. Benchmark di Contesto Ufficiale su *I Promessi Sposi* (`speed-bench/promessi_sposi.txt`)
+
+Per validare la tenuta della memoria, l'assenza di OOM e la velocità al crescere della finestra di contesto, abbiamo eseguito lo sweep ufficiale di Salvatore con [`benchmarks/sweep_promessi_sposi.py`](./benchmarks/sweep_promessi_sposi.py):
+
+- **Modello**: `DeepSeek-V4-Flash-Q2` (80.7 GiB).
+- **Testo**: `speed-bench/promessi_sposi.txt` (testo integrale ripulito, 1.3 MB).
+- **Frontiere testate**: 2.048, 4.096, 8.192, 16.384 token di contesto (con 128 token di generazione greedy per frontiera).
+- **Logits di controllo**: tutti e 4 i vettori di logits completi (129.280 valori) estratti e salvati in [`benchmarks/promessi_sposi_logits/`](./benchmarks/promessi_sposi_logits).
+
+### Risultati Sperimentali (`promessi_sposi_sweep.csv`)
+
+| Contesto (Token) | Prefill (Token/s) | Steady Decode (Token/s) | Latenza Decode (ms/tok) | Tempo Frontiera (s) | Stato Memoria VRAM |
+| :---: | :---: | :---: | :---: | :---: | :---: |
+| **2.048** | 70.86 t/s | **6.20 t/s** | 161.3 ms | 51.6s | Stabile (1.489 slot, 9.82G) |
+| **4.096** | **138.09 t/s** | **6.55 t/s** | 152.7 ms | 51.4s | Stabile (1.489 slot, 9.82G) |
+| **8.192** | 121.70 t/s | **5.21 t/s** | 191.9 ms | 94.1s | Stabile (1.489 slot, 9.82G) |
+| **16.384** | 115.23 t/s | **4.90 t/s** | 204.1 ms | 170.6s | Stabile (1.489 slot, 9.82G) |
+
+- **Speedup vs Baseline non ottimizzata**:
+  - La Baseline girava a **1.02 token/s** costanti.
+  - Sulla frontiera di **16K token**, la versione ottimizzata mantiene **4.90 token/s** (**4.8x speedup** su un contesto esteso!).
+  - A contesti medi (2K–4K) viaggia stabilmente a **6.20 – 6.55 token/s** (**6.4x speedup**).
+- **Grafico Throughput Generato**: [`benchmarks/promessi_sposi_sweep_ts.svg`](./benchmarks/promessi_sposi_sweep_ts.svg) tramite `speed-bench/plot_speed.py`.
+
 - **Traffico attivo per token**: 40 layer $\times$ 6 esperti $\times$ 6.75 MiB = **1.62 GiB/token**.
 - **Senza ottimizzazioni (lettura SSD `O_DIRECT` a ~3.2 GB/s)**: ~450–530 ms/token (**~1.8–2.2 tok/s**).
 - **Con le nostre ottimizzazioni (Cache VRAM ~40% hit rate + DMA PCIe 4.0 x16 da RAM a ~26 GB/s + Overlap Shared Expert)**:

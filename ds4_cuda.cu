@@ -29114,7 +29114,7 @@ static int cuda_stream_selected_cache_begin_load(
             const uint64_t expected_static_arenas = UINT64_C(8960) << 20;
             const uint64_t unloaded_static = (!integrated && arena_bytes < expected_static_arenas) ?
                 (expected_static_arenas - arena_bytes) : 0;
-            uint64_t workspace_reserve_mb = 4096;
+            uint64_t workspace_reserve_mb = 5120;
             if (const char *env_res = getenv("DS4_CUDA_STREAMING_VRAM_RESERVE_MB")) {
                 char *end = NULL;
                 unsigned long long v = strtoull(env_res, &end, 10);
