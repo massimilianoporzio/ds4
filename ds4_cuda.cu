@@ -181,6 +181,10 @@ typedef struct {
 static cudaStream_t g_stream_selected_upload_stream;
 static cudaEvent_t g_stream_selected_upload_done_event = NULL;
 static bool g_stream_selected_upload_event_pending = false;
+static cudaEvent_t g_selected_readback_event = NULL;
+static cudaEvent_t g_stream_moe_done_event = NULL;
+static int32_t *g_stream_remap_pinned = NULL;
+static size_t g_stream_remap_pinned_capacity = 0;
 static void cuda_stream_selected_wait_upload_ready(void);
 
 static cuda_stream_selected_cache g_stream_selected_cache;
@@ -230,6 +234,11 @@ static void cuda_stream_selected_cache_release(void) {
     }
     if (g_stream_selected_cache.prefill_ptr) {
         (void)cudaFree(g_stream_selected_cache.prefill_ptr);
+    }
+    if (g_stream_remap_pinned) {
+        (void)cudaFreeHost(g_stream_remap_pinned);
+        g_stream_remap_pinned = NULL;
+        g_stream_remap_pinned_capacity = 0;
     }
     memset(&g_stream_selected_cache, 0, sizeof(g_stream_selected_cache));
     g_stream_selected_cache.logical_tier = -1;
@@ -2359,6 +2368,14 @@ static void cuda_stream_selected_stage_release(void) {
         g_stream_selected_upload_done_event = NULL;
     }
     g_stream_selected_upload_event_pending = false;
+    if (g_selected_readback_event) {
+        (void)cudaEventDestroy(g_selected_readback_event);
+        g_selected_readback_event = NULL;
+    }
+    if (g_stream_moe_done_event) {
+        (void)cudaEventDestroy(g_stream_moe_done_event);
+        g_stream_moe_done_event = NULL;
+    }
     if (g_stream_selected_upload_stream) {
         (void)cudaStreamDestroy(g_stream_selected_upload_stream);
         g_stream_selected_upload_stream = NULL;
@@ -4015,7 +4032,14 @@ extern "C" int ds4_gpu_pack_slot_rows_f32_tensor(
 }
 
 extern "C" int ds4_gpu_begin_commands(void) { return 1; }
-extern "C" int ds4_gpu_flush_commands(void) { return cuda_ok(cudaDeviceSynchronize(), "flush"); }
+extern "C" int ds4_gpu_flush_commands(void) {
+    if (getenv("DS4_CUDA_SYNC_FLUSH") != NULL) {
+        return cuda_ok(cudaDeviceSynchronize(), "flush");
+    }
+    cudaError_t err = cudaStreamQuery(cuda_decode_stream());
+    if (err == cudaSuccess || err == cudaErrorNotReady) return 1;
+    return cuda_ok(err, "flush commands");
+}
 extern "C" int ds4_gpu_end_commands(void) {
     if (g_cuda_end_stream_sync) {
         return cuda_ok(cudaStreamSynchronize(0), "end commands stream");
@@ -27759,6 +27783,14 @@ static int routed_moe_launch(
         moe_sum_kernel<<<(n + 255) / 256, 256, 0, cuda_decode_stream()>>>((float *)out->ptr, (const float *)down->ptr, out_dim, n_expert, n_tokens);
         ok = cuda_ok(cudaGetLastError(), "routed_moe sum launch");
     }
+    if (ok && stream_model) {
+        if (!g_stream_moe_done_event) {
+            (void)cudaEventCreateWithFlags(&g_stream_moe_done_event, cudaEventDisableTiming);
+        }
+        if (g_stream_moe_done_event) {
+            (void)cudaEventRecord(g_stream_moe_done_event, cuda_decode_stream());
+        }
+    }
     return ok;
 }
 
@@ -29100,8 +29132,12 @@ static int cuda_stream_selected_cache_begin_load(
         fprintf(stderr, "ds4: CUDA SSD streaming requires single-GPU placement\n");
         return 0;
     }
-    if (!cuda_ok(cudaStreamSynchronize(cuda_decode_stream()), "stream expert reuse wait"))
-        return 0;
+    if (order_reads || !g_stream_moe_done_event || !g_stream_selected_upload_stream || getenv("DS4_CUDA_SYNC_EXPERT_REUSE") != NULL) {
+        if (!cuda_ok(cudaStreamSynchronize(cuda_decode_stream()), "stream expert reuse wait"))
+            return 0;
+    } else {
+        (void)cudaStreamWaitEvent(g_stream_selected_upload_stream, g_stream_moe_done_event, 0);
+    }
     try {
         std::vector<int32_t> expert_to_slot(table->n_total_expert, -1);
         std::vector<int32_t> unique, remap(slot_count);
@@ -29368,9 +29404,29 @@ static int cuda_stream_selected_cache_begin_load(
         g_stream_prefill_ids = remap;
         g_stream_prefill_slots = slots;
         for (auto &id : remap) id = slots[id];
-        if (!cuda_ok(cudaMemcpy(cache.slot_selected_ptr, remap.data(),
-                (size_t)slot_count * sizeof(int32_t), cudaMemcpyHostToDevice),
-                "stream selected-id remap copy")) return 0;
+        if (slot_count > g_stream_remap_pinned_capacity) {
+            if (g_stream_remap_pinned) {
+                (void)cudaFreeHost(g_stream_remap_pinned);
+                g_stream_remap_pinned = NULL;
+                g_stream_remap_pinned_capacity = 0;
+            }
+            const size_t alloc_count = std::max((size_t)slot_count, (size_t)256);
+            if (cudaHostAlloc(&g_stream_remap_pinned, alloc_count * sizeof(int32_t),
+                              cudaHostAllocDefault) == cudaSuccess) {
+                g_stream_remap_pinned_capacity = alloc_count;
+            }
+        }
+        if (g_stream_remap_pinned && g_stream_remap_pinned_capacity >= slot_count) {
+            memcpy(g_stream_remap_pinned, remap.data(), (size_t)slot_count * sizeof(int32_t));
+            if (!cuda_ok(cudaMemcpyAsync(cache.slot_selected_ptr, g_stream_remap_pinned,
+                    (size_t)slot_count * sizeof(int32_t), cudaMemcpyHostToDevice,
+                    cuda_decode_stream()),
+                    "stream selected-id remap copy async")) return 0;
+        } else {
+            if (!cuda_ok(cudaMemcpy(cache.slot_selected_ptr, remap.data(),
+                    (size_t)slot_count * sizeof(int32_t), cudaMemcpyHostToDevice),
+                    "stream selected-id remap copy")) return 0;
+        }
         cache.layer = table->layer;
         cache.n_total_expert = table->n_total_expert;
         cache.slot_count = slot_count;
@@ -35640,8 +35696,18 @@ extern "C" int ds4_gpu_shared_mid_swiglu_q8_0_tensor(
 }
 
 extern "C" int ds4_gpu_signal_selected_readback_ready(uint64_t *event_value) {
+    if (getenv("DS4_CUDA_SYNC_READBACK") != NULL) {
+        if (event_value) *event_value = 1;
+        return cuda_ok(cudaDeviceSynchronize(), "selected readback signal");
+    }
+    if (!g_selected_readback_event) {
+        if (!cuda_ok(cudaEventCreateWithFlags(&g_selected_readback_event, cudaEventDisableTiming),
+                     "selected readback event create"))
+            return 0;
+    }
     if (event_value) *event_value = 1;
-    return cuda_ok(cudaDeviceSynchronize(), "selected readback signal");
+    return cuda_ok(cudaEventRecord(g_selected_readback_event, cuda_decode_stream()),
+                   "selected readback signal");
 }
 
 extern "C" int ds4_gpu_stream_expert_cache_begin_selected_load(
@@ -35702,9 +35768,16 @@ extern "C" int ds4_gpu_tensor_read_after_selected_event(const ds4_gpu_tensor *te
         bytes > tensor->bytes - offset) {
         return 0;
     }
-    if (!cuda_ok(cudaDeviceSynchronize(),
-                 label ? label : "selected readback wait")) {
-        return 0;
+    if (g_selected_readback_event && getenv("DS4_CUDA_SYNC_READBACK") == NULL) {
+        if (!cuda_ok(cudaEventSynchronize(g_selected_readback_event),
+                     label ? label : "selected readback wait")) {
+            return 0;
+        }
+    } else {
+        if (!cuda_ok(cudaDeviceSynchronize(),
+                     label ? label : "selected readback wait")) {
+            return 0;
+        }
     }
     return cuda_ok(cudaMemcpy(data, (const char *)tensor->ptr + offset,
                               (size_t)bytes, cudaMemcpyDeviceToHost),
@@ -35827,6 +35900,10 @@ extern "C" void ds4_gpu_tp_set_attn_head_split(int enabled) {
 
 extern "C" int ds4_gpu_wait_selected_readback_ready(uint64_t event_value, const char *label) {
     (void)event_value;
+    if (g_selected_readback_event && getenv("DS4_CUDA_SYNC_READBACK") == NULL) {
+        return cuda_ok(cudaEventSynchronize(g_selected_readback_event),
+                       label ? label : "selected readback wait");
+    }
     return cuda_ok(cudaDeviceSynchronize(),
                    label ? label : "selected readback wait");
 }
@@ -35837,6 +35914,10 @@ extern "C" int ds4_gpu_wait_selected_readback_ready(uint64_t event_value, const 
 extern "C" int ds4_gpu_commit_and_wait_selected_readback(
         uint64_t event_value, const char *label) {
     (void)event_value;
+    if (g_selected_readback_event && getenv("DS4_CUDA_SYNC_READBACK") == NULL) {
+        return cuda_ok(cudaEventSynchronize(g_selected_readback_event),
+                       label ? label : "selected readback wait");
+    }
     return cuda_ok(cudaDeviceSynchronize(),
                    label ? label : "selected readback wait");
 }

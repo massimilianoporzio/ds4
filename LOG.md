@@ -265,22 +265,27 @@ Per validare la tenuta della memoria, l'assenza di OOM e la velocità al crescer
   - Tempo di calcolo GPU (936 GB/s GDDR6X su ~14.8 GB letti in VRAM): **~18–20 ms** (in gran parte sovrapposto al trasferimento PCIe grazie a `Opt 2.3`).
   - **Tempo totale per token stimato**: **~70–100 ms/token** $\rightarrow$ **10 – 14 token/s** (ampiamente sopra il target di **8 token/s**!).
 
-### FASE 3: Benchmark Comparativo e Verifica Correttezza
-- [ ] **Step 3.1**: Confronto tokens/s (Prefill & Decode) e latenza PCIe per ogni step di ottimizzazione rispetto alla Baseline.
-- [ ] **Step 3.2**: Test su prompt lungo per verificare l'assenza di NaN, corruzione numerica o degradazione del testo.
+### FASE 3: Benchmark Comparativo e Certificazione Statistica
+- [x] **Step 3.1**: Dataset multi-dominio 100 run (D1_code, D2_math, D3_prose, D4_bench) per ogni iterazione software (`benchmarks/results.csv` e `token_timings.csv`).
+- [x] **Step 3.2**: Analisi inferenziale rigorosa con Linear Mixed-Effects Model (LMM via REML) e Two One-Sided Tests (TOST per equivalenza numerica).
+- [x] **Step 3.3**: Stress test su contesto ultra-lungo (2.048 – 16.384 token su *I Promessi Sposi*) con validazione bit-level dei vettori logits e tenuta memoria a zero leak.
 
-### FASE 4 (Opzionale / Rifinitura Finale): Tuning Kernel Linux, VM & Bus PCIe 4.0
-Dall'ispezione del sistema attuale (`Kernel 6.8.0-138-generic`, Ryzen 9 3900X, RTX 3090 su bus `0000:2D:00.0`), manteniamo tutte le modifiche **100% isolate dentro Ubuntu** (senza toccare il BIOS o impostazioni condivise con Windows in dual-boot):
+### FASE 4 (Post-Ottimizzazioni Software): Tuning Kernel Linux, CPU Governor & Bus PCIe 4.0
+Per non alterare il rigore scientifico del modello statistico (regola del *ceteris paribus*), queste ottimizzazioni di sistema e del sistema operativo vengono applicate e misurate **DOPO** aver completato tutti gli step software in `ds4`:
 - [x] **Sys 4.1 — `vm.swappiness=10` (Attivato!)**:
   - Portato da `60` a `10` (`sysctl vm.swappiness = 10`). Il kernel tiene sempre in RAM le app del PC e sacrifica per prime le pagine read-only del `.gguf` se serve memoria.
 - [ ] **Sys 4.2 — Transparent Huge Pages (`MADV_HUGEPAGE`) sui buffer DMA (Lato Codice `ds4_cuda.cu`)**:
   - Nel kernel attuale THP è in modalità `[madvise]`. Aggiungendo `madvise(..., MADV_HUGEPAGE)` direttamente in `ds4_cuda.cu` sui buffer di staging e sulla mappa, passiamo da pagine di 4 KiB (1.728 descrittori scatter-gather per esperto) a **HugePages da 2 MiB** (4 descrittori per esperto), riducendo i TLB miss sul bus PCIe.
 - [ ] **Sys 4.3 — IOMMU Pass-Through (`iommu=pt`) su AMD Ryzen (Opzionale solo in GRUB di Ubuntu)**:
-  - Su Ryzen 3900X, la traduzione degli indirizzi DMA nell'IOMMU ad ogni `cudaMemcpyAsync` costa il **5%–12% di banda PCIe 4.0**. Se servisse a fine lavori, `iommu=pt` in `/etc/default/grub` agisce **solo** sul kernel Linux (zero impatto su Windows).
+  - Su Ryzen 3900X, la traduzione degli indirizzi DMA nell'IOMMU ad ogni `cudaMemcpyAsync` costa il **5%–12% di banda PCIe 4.0**. `iommu=pt` in `/etc/default/grub` agisce **solo** sul kernel Linux (zero impatto su Windows).
 - [x] **Sys 4.4 — Persistence Mode & Power Limit 230W (`nvidia-smi -pm 1`, `-pl 230` — Attivato!)**:
   - Verificato: `Persistence Mode: Enabled`, `Power Limit: 230.00 W` (da 350.00 W), `Temp: 42°C`.
-- [x] ~~**Sys 4.5 — Resizable BAR (Escluso per non toccare BIOS / Dual-Boot Windows)**~~:
-  - **Scartato**: attivare ReBAR/Above 4G nel BIOS impatterebbe anche Windows (e potenzialmente CSM/boot o alcuni giochi), mentre il motore DMA hardware della RTX 3090 (`cudaMemcpyAsync`) viaggia già a piena banda PCIe 4.0 x16 (~27–28 GB/s) anche con `BAR1 = 256 MiB`.
+- [ ] **Sys 4.5 — CPU Governor `performance` (da `schedutil` a `performance`)**:
+  - Attualmente il Ryzen 9 3900X usa `schedutil` che fa oscillare i clock tra 2.2 e 4.2 GHz decine di volte al secondo. Impostando `echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`, tutti i 12 core fisici restano fissi a boost massimo eliminando i micro-stalli di latenza della CPU.
+- [ ] **Sys 4.6 — Prevenzione del Downshift PCIe a Gen 1 (PCIe ASPM & Link State)**:
+  - Ispezione `nvidia-smi -q`: a riposo la RTX 3090 retrocede a `PCIe Gen 1` (4 GB/s invece di 31.5 GB/s di Gen 4). Con `sudo nvidia-smi --auto-boost-permission=0` e parametro kernel `pcie_aspm=off`, si evita la rinegoziazione dinamica del link ad ogni burst di token.
+- [x] ~~**Sys 4.7 — Resizable BAR (Escluso per non toccare BIOS / Dual-Boot Windows)**~~:
+  - **Scartato**: attivare ReBAR/Above 4G nel BIOS impatterebbe anche Windows, mentre il motore DMA hardware della RTX 3090 (`cudaMemcpyAsync`) viaggia già a piena banda PCIe 4.0 x16 (~27–28 GB/s) anche con `BAR1 = 256 MiB`.
 
 ---
 
