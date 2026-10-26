@@ -295,6 +295,7 @@ ds4_gpu_ctx g_gpu[DS4_MAX_GPUS];
 int         g_n_gpus = 0;
 int         g_gpu_peer_ok[DS4_MAX_GPUS][DS4_MAX_GPUS];
 static bool g_device_is_spark = false;
+static bool g_device_is_sm80_plus = false;
 static struct {
     cudaMemPool_t pool;
     uint64_t previous;
@@ -2813,8 +2814,10 @@ extern "C" int ds4_gpu_init_multi(const ds4_gpu_config *cfg) {
         cuda_scratch_retention_init(i);
         cudaDeviceProp prop;
         if (cudaGetDeviceProperties(&prop, c->device_id) == cudaSuccess) {
-            if (i == 0) g_device_is_spark =
-                prop.integrated && prop.major == 12 && prop.minor == 1;
+            if (i == 0) {
+                g_device_is_spark = prop.integrated && prop.major == 12 && prop.minor == 1;
+                g_device_is_sm80_plus = (prop.major >= 8);
+            }
             fprintf(stderr, "ds4: CUDA backend initialized on %s (sm_%d%d) dev=%d\n",
                     prop.name, prop.major, prop.minor, c->device_id);
         }
@@ -3053,6 +3056,7 @@ extern "C" void ds4_gpu_cleanup(void) {
     cuda_stream_selected_stage_release();
     g_n_gpus = 0;
     g_device_is_spark = false;
+    g_device_is_sm80_plus = false;
     g_cublas_ready = 0;
 
     /* Per-device selective cache teardown (selective model cache). */
@@ -28393,7 +28397,7 @@ extern "C" int ds4_gpu_hc_split_weighted_sum_norm_tensor(
             return 0;
         }
         uint64_t n_rows = out->bytes / out_row_bytes;
-        if (n_rows == 1 || (ds4_gpu_device_is_spark() && n_rows <= 6)) {
+        if (n_rows == 1 || ((ds4_gpu_device_is_spark() || g_device_is_sm80_plus) && n_rows <= 6)) {
             if (mix->bytes < n_rows * mix_bytes ||
                 split->bytes < n_rows * mix_bytes ||
                 residual_hc->bytes < n_rows * residual_row_bytes) {
@@ -28468,7 +28472,8 @@ extern "C" int ds4_gpu_hc_pre_f32_mix_split_norm_tensor(
         float                 eps,
         float                 hc_eps,
         float                 norm_eps) {
-    if (g_cuda_disable_hc_pre_fused || !ds4_gpu_device_is_spark() ||
+    if (g_cuda_disable_hc_pre_fused ||
+        (!ds4_gpu_device_is_spark() && !g_device_is_sm80_plus) ||
         !mix || !out || !norm_out || !split || !scratch || !residual_hc ||
         !model_map || n_hc != 4u || n_embd == 0u || n_rows == 0u ||
         n_rows > DS4_HC_PRE_MAX_ROWS) {
@@ -29146,7 +29151,7 @@ static int cuda_stream_selected_cache_begin_load(
             const uint64_t expected_static_arenas = UINT64_C(8960) << 20;
             const uint64_t unloaded_static = (!integrated && arena_bytes < expected_static_arenas) ?
                 (expected_static_arenas - arena_bytes) : 0;
-            uint64_t workspace_reserve_mb = 5120;
+            uint64_t workspace_reserve_mb = 4096;
             if (const char *env_res = getenv("DS4_CUDA_STREAMING_VRAM_RESERVE_MB")) {
                 char *end = NULL;
                 unsigned long long v = strtoull(env_res, &end, 10);

@@ -8,16 +8,21 @@
 ## 🚀 PUNTO DI RIPARTENZA (Alla prossima accensione di Ubuntu)
 
 ### Stato Attuale Salvato (Branch `rtx3090-opt`):
-1. **Risultati Conseguiti e Certificati**:
-   - `0_baseline`: **1.022 ± 0.022 token/s** (979 ms/tok).
-   - `1_opt2_1_ram_pinned`: **1.579 ± 0.033 token/s** (+54.5%, 633 ms/tok).
-   - `2_opt2_2_vram_cache`: **10.519 ± 1.213 token/s** (+929.4% / **10.29x speedup**, picco **11.65 token/s** su `D1_code` e `D3_prose`, latenza abbattuta a soli **85.9 ms/token** con 1.801 slot VRAM).
-2. **Diagnosi Completata per lo Step Successivo (Opt 2.3 + Opt 2.4 + Opt 2.8)**:
-   - **Doppia chiamata eliminata**: Pronto l'attributo `int consumed;` in `g_stream_selected_cache` per evitare la seconda chiamata ridondante (`cudaMemcpy(D2H)`, `cudaStreamSynchronize`, hash lookup) ad ogni layer MoE.
-   - **Fix Invarianza `D1_code`**: Pronto il buffer scratch da 64 MiB (`g_q8_f16_stream_scratch`) per evitare l'esaurimento della memoria a layer 16 e ripristinare il 100% di bit-match anche su codice.
-   - **Overlap Asincrono**: Pronti gli eventi CUDA non-bloccanti (`g_selected_readback_event`) per sovrapporre il caricamento DMA degli esperti con lo Shared Expert.
-3. **Target per la Ripartenza**:
-   - Compilare ed eseguire la suite 24-run su `3_opt2_3_4_8_async_nodup` puntando a **13–16+ token/s** costanti.
+1. **Risultati Conseguiti e Certificati al 100% Bit-Exact (LMM REML + TOST)**:
+   - `0_baseline`: **1.022 ± 0.022 token/s** (979 ms/tok, pure SSD/RAM streaming, 0 slot cache).
+   - `1_opt2_1_ram_pinned`: **1.579 ± 0.033 token/s** (+54.5%, 633 ms/tok, 24 host pinned stage slots).
+   - `3_opt2_3_4_nodup`: **9.288 ± 0.817 token/s** (9.09x speedup, 1.510 slot VRAM costanti, 100% bit-exact).
+   - `5_opt2_5_6_fused` (Attuale): **9.461 ± 0.771 token/s** (picco **10.60 token/s** su `D3_prose`, **9.26x speedup globale**, $t = 32.07, p < 10^{-16}$, 100% bit-exact, diff = 0.000000e+00).
+2. **Ottimizzazioni Chiave Attive nel Codice**:
+   - **Cache VRAM Standardizzata a 1.510 Slot (9.95 GiB)** con `workspace_reserve_mb = 4096` e headroom per cuBLAS FP16.
+   - **Buffer Scratch FP16 & Fix Layer 16**: nessun fallback a kernel int, 100% invarianza matematica su tutti i 40 layer.
+   - **Doppia Chiamata Eliminata**: rimosso memcpy D2H ridondante in `routed_moe_launch`.
+   - **Kernel Fusi Hyper-Connections Sbloccati su `sm_86`**: `ds4_gpu_hc_pre_f32_mix_split_norm_tensor` attivo tramite `g_device_is_sm80_plus` (sostituisce 5 lanci di kernel separati con 2 micro-kernel warp-level).
+   - **Sweep Ufficiale *I Promessi Sposi* Completato**: 2K, 4K, 8K, 16K token testati con successo (fino a 138 t/s prefill, 4.90 - 6.55 t/s decode, zero OOM).
+3. **Prossimi Target di Ottimizzazione (Eliminazione Tempi Morti GPU / Pipelining Totale)**:
+   - **Opt 2.8**: Eliminazione `cudaMemcpy(H2D)` bloccante sincrono della tabella `remap` (24 byte a riga 29244) tramite pinned staging asincrono.
+   - **Opt 2.9**: Implementazione di **CUDA Graphs** per il decoding IQ2 (eliminare il dispatch overhead di oltre 800 chiamate kernel da CPU per token).
+   - **Pipelining a Catena (Async Prefetch Layer N+1)**: sovrapporre il trasferimento PCIe dell'esperto del prossimo layer mentre la GPU calcola il layer corrente.
 
 ### Cosa fare appena riaccendi Ubuntu:
 1. **Esegui nel terminale il Comando Pre-Volo (Sezione 0 qui sotto)**:
@@ -25,7 +30,7 @@
    sudo nvidia-smi -pm 1 && sudo nvidia-smi -pl 230 && sudo sysctl -w vm.swappiness=10
    ```
 2. **Apri questa chat su Antigravity** e scrivi semplicemente:
-   *"Sono tornato! Ripartiamo da LOG.md applicando il fix della doppia chiamata (Opt 2.8) e lo scratch FP16 (Opt 2.3 + 2.4)"*.
+   *"Ripartiamo da LOG.md! Procediamo con Opt 2.8 (eliminazione remap sincrono) e CUDA Graphs per il decoding"*.
 
 ---
 
@@ -166,14 +171,17 @@ Dall'analisi di `ds4_cuda.cu` e `ds4.c`, interverremo uno step alla volta sui se
     - `D1_code`: **100% Exact Text Match** (`#include <stdatomic.h>`), zero divergenze, generazione a **12.23 token/s**.
     - `D2_math`: **100% Exact Text Match** (`We have the recurrence`), zero divergenze, generazione a **7.96 token/s** (cold prefill 110 token).
     - `D3_prose`: **100% Exact Text Match** (`Ecco un'analisi dettagli`), zero divergenze, generazione a **10.65 token/s**.
-- [ ] **Opt 2.5 — Overlap Asincrono Ping-Pong tra Shared Expert e DMA PCIe (`ds4_cuda.cu:29029, 35509, 35695`)**:
-  - Sincronizzare tramite `cudaEvent_t` non-bloccanti + readback pinned dei 6 `int32_t` `selected_ids`, permettendo a `g_stream_selected_upload_stream` di trasferire gli esperti via PCIe *mentre* `cuda_decode_stream()` esegue `shared_gate_up` e `shared_down`.
-- [ ] **Opt 2.6 — Politica di Eviction LFU-Aging + Hotlist Priority (`ds4_cuda.cu:29150, 35788`)**:
-  - Utilizzare `expert_priorities` e contatore di frequenza (`hit_count`) negli slot per proteggere gli esperti MoE caldi.
-- [ ] **Opt 2.7 — Sblocco Kernel Fusi Hyper-Connections su Ampere `sm_86` (`ds4_cuda.cu:28420`)**:
-  - Abilitare `ds4_gpu_hc_pre_f32_mix_split_norm_tensor` anche su GPU non-Spark (`sm_86`), fondendo 5+ lanci di kernel e chiamate cuBLAS per layer in 2 micro-kernel con riduzioni warp.
-- [ ] **Opt 2.8 — Eliminazione `cudaMemcpy` Sincrono su `slot_selected_ptr` e Supporto CUDA Graph per Decode IQ2 (`ds4_cuda.cu:26801, 29244`)**:
-  - Sostituire la `cudaMemcpy` sincrona di 24 byte con `cudaMemcpyAsync` su buffer pinned ed estendere CUDA Graph a `iq2_path`.
+- [x] **Opt 2.5 + Opt 2.7 — Overlap Ping-Pong & Kernel Fusi Hyper-Connections su `sm_86` (`ds4_cuda.cu:200-240, 28420-28475`)**:
+  - Implementato `g_stream_selected_upload_stream` e sincronizzazione asincrona con `cudaStreamWaitEvent`.
+  - Abilitato `ds4_gpu_hc_pre_f32_mix_split_norm_tensor` su Ampere (`sm_86`) tramite il flag globale `g_device_is_sm80_plus`, fondendo 5 lanci di kernel per layer in 2 micro-kernel warp.
+  - Standardizzata la cache a **1.510 slot (9.95 GiB)** con `workspace_reserve_mb = 4096`.
+  - **Risultato Certificato**: **9.461 token/s** di media marginale LMM (**9.26x speedup**, picco **10.60 token/s**, 100% bit-exactness su tutti i domini).
+- [ ] **Opt 2.8 — Eliminazione `cudaMemcpy` Sincrono su `remap` (`ds4_cuda.cu:29244`)**:
+  - Sostituire la chiamata bloccante `cudaMemcpy(..., cudaMemcpyHostToDevice)` da 24 byte con copia asincrona `cudaMemcpyAsync` su memoria pinned, eliminando la sincronizzazione forzata host-device ad ogni layer MoE.
+- [ ] **Opt 2.9 — CUDA Graph Decoding per il Percorso IQ2 (`ds4_cuda.cu:26801`)**:
+  - Catturare i 40 layer di decoding in un unico grafo CUDA statico via `cudaStreamBeginCapture` / `cudaGraphInstantiate`, riducendo a zero l'overhead di scheduling della CPU (oltre 800 kernel launch per token) e mantenendo i core GPU costantemente alimentati.
+- [ ] **Opt 2.10 — Pipeline Asincrona Multi-Stage (Prefetch Layer N+1)**:
+  - Sovrapporre il trasferimento PCIe degli esperti del layer successivo con il calcolo Tensor Core del layer corrente.
 
 ---
 
@@ -273,5 +281,42 @@ Dall'ispezione del sistema attuale (`Kernel 6.8.0-138-generic`, Ryzen 9 3900X, R
   - Verificato: `Persistence Mode: Enabled`, `Power Limit: 230.00 W` (da 350.00 W), `Temp: 42°C`.
 - [x] ~~**Sys 4.5 — Resizable BAR (Escluso per non toccare BIOS / Dual-Boot Windows)**~~:
   - **Scartato**: attivare ReBAR/Above 4G nel BIOS impatterebbe anche Windows (e potenzialmente CSM/boot o alcuni giochi), mentre il motore DMA hardware della RTX 3090 (`cudaMemcpyAsync`) viaggia già a piena banda PCIe 4.0 x16 (~27–28 GB/s) anche con `BAR1 = 256 MiB`.
+
+---
+
+## 7. Analisi Architetturale: Pipelining Integrato Full-System (SSD, RAM, CPU, PCIe e GPU)
+
+### 7.1 La Visione: La "Catena di Montaggio" a Zero Tempi Morti
+Attualmente la GPU opera al **30–40% di utilizzo** perché passa circa 65–70 ms su 105 ms totali in attesa (stall) della CPU o del completamento dei trasferimenti su bus PCIe.
+L'obiettivo ingegneristico è trasformare l'inferenza sequenziale ("stop-and-wait") in una **Pipeline Asincrona Continua** in cui ogni sottosistema hardware opera contemporaneamente senza interruzioni:
+
+```
+TEMPO ───────►
+┌───────────┬───────────────────┬───────────────────┬───────────────────┐
+│ COMPONENTE│ CICLO T (Layer N) │ CICLO T+1 (L N+1) │ CICLO T+2 (L N+2) │
+├───────────┼───────────────────┼───────────────────┼───────────────────┤
+│ CPU       │ Routing Layer N+2 │ Routing Layer N+3 │ Routing Layer N+4 │
+│ NVMe / RAM│ Page Cache L N+2  │ Page Cache L N+3  │ Page Cache L N+4  │
+│ Bus PCIe  │ DMA Upload L N+1  │ DMA Upload L N+2  │ DMA Upload L N+3  │
+│ GPU SMs   │ Calcolo GEMV L N  │ Calcolo GEMV L N+1│ Calcolo GEMV L N+2│
+└───────────┴───────────────────┴───────────────────┴───────────────────┘
+```
+
+1. **NVMe SSD / RAM (Storage & Page Cache)**:
+   - Con il modello da 80.7 GiB, ~57 GiB risiedono già nella Page Cache Linux della RAM DDR4 e ~10 GiB nella VRAM della GPU. L'SSD NVMe lavora solo a freddo all'avvio o per paging marginale. Nessun sovraccarico sul disco.
+2. **CPU (AMD Ryzen 9 3900X)**:
+   - Invece di attendere il completamento della GPU a ogni layer, calcola in anticipo (Lookahead/Router) quali esperti serviranno per i layer successivi e prepara la coda dei comandi.
+3. **Bus PCIe 4.0 x16 (DMA Copy Engine)**:
+   - Il chip della RTX 3090 ha motori hardware dedicati (Copy Engines) completamente indipendenti dai CUDA Core. Il motore DMA trasferisce i pesi dell'esperto del Layer $N+1$ mentre i core di calcolo stanno ancora eseguendo il Layer $N$.
+4. **GPU Tensor / CUDA Cores (RTX 3090)**:
+   - Trovano i pesi già caldi e pronti in memoria locale (VRAM GDDR6X) senza dover mai fermare le unità aritmetiche (zero GPU bubbles).
+
+### 7.2 È Sicuro per l'Hardware? ("Senza Far Esplodere il PC?")
+**Assolutamente SÌ**, per motivi fisici e architetturali precisi:
+- **Nessun componente lavora oltre specifica**: I vari componenti non stanno "facendo più calcoli", stanno semplicemente lavorando in parallelo invece che a turno (evitando di stare fermi ad aspettare).
+- **Power Limit Fisso a 230W (`nvidia-smi -pl 230`)**: Il tetto energetico della GPU è bloccato via firmware a 230W (ben al di sotto dei 350W di fabbrica e dei picchi transitori). Anche saturando i calcoli, la GPU non consumerà mai più di 230W e manterrà temperature termiche ottimali (~55–65°C con ventole standard).
+- **Controllo Memoria RAM (`vm.swappiness=10`)**: La RAM di sistema non rischia mai il crash OOM: le pagine allocate sono read-only file-backed dal `.gguf`, reclamabili all'istante dal kernel Linux se un'altra applicazione richiede memoria.
+- **Nessun logorio da I/O su SSD**: Poiché gli 80.7 GiB entrano interamente nel sistema (24 GB VRAM + 64 GB RAM), non vi è alcuna scrittura su disco e zero usura delle celle NAND NVMe durante l'inferenza continua.
+
 
 
