@@ -284,7 +284,19 @@ def main():
 
     lmm = fit_lmm_reml(warm_rows, "steady_decode_tps")
     if lmm:
-        lines.append("\n## 3. Modello Lineare a Effetti Misti (LMM REML): `steady_decode_tps ~ config + (1 | domain)`\n")
+        # Multiple testing correction: Holm-Bonferroni family-wise error rate (FWER) control
+        comp_effects = [e for e in lmm["effects"] if not e["is_intercept"]]
+        m = len(comp_effects)
+        sorted_indices = sorted(range(m), key=lambda i: comp_effects[i]["p_value"])
+        cum_max = 0.0
+        for rank, idx in enumerate(sorted_indices):
+            raw_p = comp_effects[idx]["p_value"]
+            multiplier = m - rank
+            adj_p = min(1.0, raw_p * multiplier)
+            cum_max = max(cum_max, adj_p)
+            comp_effects[idx]["p_holm"] = cum_max
+
+        lines.append("\n## 3. Modello Lineare a Effetti Misti (LMM REML) con Correzione per Confronti Multipli (Holm-Bonferroni)\n")
         lines.append(
             f"- **Componenti di Varianza (Effetti Aleatori)**: "
             f"$\\hat{{\\sigma}}_{{\\text{{domain}}}} = {lmm['sigma_domain']:.4f}\\text{{ t/s}}$, "
@@ -292,15 +304,23 @@ def main():
             f"$\\text{{ICC}} = {lmm['icc'] * 100.0:.1f}\\%$, "
             f"$N = {lmm['n_obs']}, \\text{{df}} = {lmm['df']}$\n"
         )
-        lines.append("| Parametro Effetto Fisso | Stima $\\hat{\\beta}$ (t/s) | Errore Standard (SE) | $\\text{IC}_{95\\%}$ Parametrico | $t$-stat | $p$-value |")
-        lines.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
+        lines.append("| Parametro Effetto Fisso | Stima $\\hat{\\beta}$ (t/s) | Errore Standard (SE) | $\\text{IC}_{95\\%}$ Parametrico | $t$-stat | $p$-value (grezzo) | $p$-value (Holm adj) | Sig (FWER $\\alpha=0.05$) |")
+        lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
         for eff in lmm["effects"]:
             label = f"Intercetta (`{eff['config']}`)" if eff["is_intercept"] else f"Delta `{eff['config']}` vs Baseline"
             est_str = f"{eff['estimate']:.4f}" if eff["is_intercept"] else f"{eff['estimate']:+.4f}"
-            lines.append(
-                f"| {label} | **{est_str}** | {eff['se']:.4f} | "
-                f"[{eff['ci95_lo']:.4f}, {eff['ci95_hi']:.4f}] | {eff['t_stat']:.2f} | {eff['p_value']:.3e} |"
-            )
+            if eff["is_intercept"]:
+                lines.append(
+                    f"| {label} | **{est_str}** | {eff['se']:.4f} | "
+                    f"[{eff['ci95_lo']:.4f}, {eff['ci95_hi']:.4f}] | {eff['t_stat']:.2f} | {eff['p_value']:.3e} | - | Ref |"
+                )
+            else:
+                p_holm = eff.get("p_holm", eff["p_value"])
+                sig_str = "***" if p_holm < 0.001 else ("**" if p_holm < 0.01 else ("*" if p_holm < 0.05 else "n.s."))
+                lines.append(
+                    f"| {label} | **{est_str}** | {eff['se']:.4f} | "
+                    f"[{eff['ci95_lo']:.4f}, {eff['ci95_hi']:.4f}] | {eff['t_stat']:.2f} | {eff['p_value']:.3e} | {p_holm:.3e} | {sig_str} |"
+                )
 
     report_text = "\n".join(lines) + "\n"
     with open(REPORT_MD, "w", encoding="utf-8") as f:

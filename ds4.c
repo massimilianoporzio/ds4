@@ -24228,8 +24228,17 @@ static bool metal_graph_encode_decode_layer_phase(
         !g_expert_profile.active &&
         metal_graph_debug_get_config()->prefix == NULL &&
         ds4_gpu_decode_graphs_supported() != 0;
+    const bool decode_graphs_island_a_ok =
+        !g->placement &&
+        g->tp_world <= 1 &&
+        !g->cuda_tp_decode &&
+        !g->materialize_ffn_out &&
+        !decode_stage_profile &&
+        !g_expert_profile.active &&
+        metal_graph_debug_get_config()->prefix == NULL &&
+        ds4_gpu_decode_graphs_supported() != 0;
     const bool island_a_ok =
-        decode_graphs_common_ok &&
+        decode_graphs_island_a_ok &&
         phase == METAL_DECODE_LAYER_FULL &&
         !tp_ablate_hcpre &&
         DS4_N_HC == 4 &&

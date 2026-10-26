@@ -8,17 +8,21 @@
 ## 🚀 PUNTO DI RIPARTENZA (Alla prossima accensione di Ubuntu)
 
 ### Stato Attuale Salvato (Branch `rtx3090-opt`):
-1. **Risultati Conseguiti e Certificati al 100% Bit-Exact (LMM REML + TOST)**:
+1. **Risultati Conseguiti e Certificati al 100% Bit-Exact (LMM REML + TOST + Holm-Bonferroni FWER)**:
    - `0_baseline`: **1.022 ± 0.022 token/s** (979 ms/tok, pure SSD/RAM streaming, 0 slot cache).
    - `1_opt2_1_ram_pinned`: **1.579 ± 0.033 token/s** (+54.5%, 633 ms/tok, 24 host pinned stage slots).
    - `3_opt2_3_4_nodup`: **9.288 ± 0.817 token/s** (9.09x speedup, 1.510 slot VRAM costanti, 100% bit-exact).
-   - `5_opt2_5_6_fused` (Attuale): **9.461 ± 0.771 token/s** (picco **10.60 token/s** su `D3_prose`, **9.26x speedup globale**, $t = 32.07, p < 10^{-16}$, 100% bit-exact, diff = 0.000000e+00).
+   - `5_opt2_5_6_fused`: **9.461 ± 0.771 token/s** (picco **10.60 token/s** su `D3_prose`, 9.26x speedup).
+   - `6_opt2_8_async_flush`: **10.346 ± 0.873 token/s** (10.12x speedup globale, picco **11.55 t/s** su `D3_prose`, async stream flush, remap pinned staging, zero `cudaDeviceSynchronize`).
+   - `7_opt2_9_cuda_graphs` (Attuale): **10.178 ± 1.170 token/s** (9.96x speedup globale, picco **11.74 t/s** steady su `D3_prose` con picco massimo **11.82 t/s**, **10.11 t/s** su `D1_code`, **9.95 t/s** su `D2_math`; Island A CUDA Graph capture attiva; 100% bit-exact `max_abs_diff = 0.000000e+00`).
 2. **Ottimizzazioni Chiave Attive nel Codice**:
    - **Cache VRAM Standardizzata a 1.510 Slot (9.95 GiB)** con `workspace_reserve_mb = 4096` e headroom per cuBLAS FP16.
    - **Buffer Scratch FP16 & Fix Layer 16**: nessun fallback a kernel int, 100% invarianza matematica su tutti i 40 layer.
    - **Doppia Chiamata Eliminata**: rimosso memcpy D2H ridondante in `routed_moe_launch`.
    - **Kernel Fusi Hyper-Connections Sbloccati su `sm_86`**: `ds4_gpu_hc_pre_f32_mix_split_norm_tensor` attivo tramite `g_device_is_sm80_plus` (sostituisce 5 lanci di kernel separati con 2 micro-kernel warp-level).
-   - **Sweep Ufficiale *I Promessi Sposi* Completato**: 2K, 4K, 8K, 16K token testati con successo (fino a 138 t/s prefill, 4.90 - 6.55 t/s decode, zero OOM).
+   - **Flusso Asincrono & Eventi Leggeri**: `g_selected_readback_event` e `cudaStreamWaitEvent` per l'overlap completo CPU-GPU.
+   - **CUDA Graph per Island A**: cattura e replay hardware dei kernel statici VRAM (`METAL_DECODE_LAYER_TO_QKV`).
+   - **Palette Universale Okabe-Ito (2008)**: integrata nello script SVG di visualizzazione scientifica con bande di confidenza al 95% (`plot_ci_bands.py`).
 3. **Prossimi Target di Ottimizzazione (Eliminazione Tempi Morti GPU / Pipelining Totale)**:
    - **Opt 2.8**: Eliminazione `cudaMemcpy(H2D)` bloccante sincrono della tabella `remap` (24 byte a riga 29244) tramite pinned staging asincrono.
    - **Opt 2.9**: Implementazione di **CUDA Graphs** per il decoding IQ2 (eliminare il dispatch overhead di oltre 800 chiamate kernel da CPU per token).
@@ -257,6 +261,9 @@ Per validare la tenuta della memoria, l'assenza di OOM e la velocità al crescer
   - Sulla frontiera di **16K token**, la versione ottimizzata mantiene **4.90 token/s** (**4.8x speedup** su un contesto esteso!).
   - A contesti medi (2K–4K) viaggia stabilmente a **6.20 – 6.55 token/s** (**6.4x speedup**).
 - **Grafico Throughput Generato**: [`benchmarks/promessi_sposi_sweep_ts.svg`](./benchmarks/promessi_sposi_sweep_ts.svg) tramite `speed-bench/plot_speed.py`.
+- **Grafici Ufficiali con Bande di Confidenza al 95%**: generati tramite [`benchmarks/plot_ci_bands.py`](./benchmarks/plot_ci_bands.py) con palette **Okabe-Ito (2008)** universale per il daltonismo (Color Vision Deficiency):
+  - Traiettoria progressione ottimizzazioni: [`benchmarks/progression_ci_bands.svg`](./benchmarks/progression_ci_bands.svg)
+  - Scaling di contesto Promessi Sposi con bande $\pm t\cdot\text{SE}$: [`benchmarks/promessi_sposi_ci_bands.svg`](./benchmarks/promessi_sposi_ci_bands.svg)
 
 - **Traffico attivo per token**: 40 layer $\times$ 6 esperti $\times$ 6.75 MiB = **1.62 GiB/token**.
 - **Senza ottimizzazioni (lettura SSD `O_DIRECT` a ~3.2 GB/s)**: ~450–530 ms/token (**~1.8–2.2 tok/s**).
@@ -267,8 +274,10 @@ Per validare la tenuta della memoria, l'assenza di OOM e la velocità al crescer
 
 ### FASE 3: Benchmark Comparativo e Certificazione Statistica
 - [x] **Step 3.1**: Dataset multi-dominio 100 run (D1_code, D2_math, D3_prose, D4_bench) per ogni iterazione software (`benchmarks/results.csv` e `token_timings.csv`).
-- [x] **Step 3.2**: Analisi inferenziale rigorosa con Linear Mixed-Effects Model (LMM via REML) e Two One-Sided Tests (TOST per equivalenza numerica).
+- [x] **Step 3.2**: Analisi inferenziale rigorosa con Linear Mixed-Effects Model (LMM via REML) e Two One-Sided Tests (TOST per equivalenza numerica con correzione di Holm-Bonferroni).
 - [x] **Step 3.3**: Stress test su contesto ultra-lungo (2.048 – 16.384 token su *I Promessi Sposi*) con validazione bit-level dei vettori logits e tenuta memoria a zero leak.
+- [ ] **Step 3.4**: Suite ufficiale di test di Salvatore Sanfilippo (`make test`, `QA_BEFORE_RELEASES.md`, `ds4-eval`) estesa con analisi LMM per certificare IC 95% e p-value su tutti i casi di regressione previsti dall'autore.
+- [ ] **Step 3.5**: Pulizia architetturale, documentazione e re-factoring del toolchain di benchmark e visualizzazione CI prima della Pull Request upstream.
 
 ### FASE 4 (Post-Ottimizzazioni Software): Tuning Kernel Linux, CPU Governor & Bus PCIe 4.0
 Per non alterare il rigore scientifico del modello statistico (regola del *ceteris paribus*), queste ottimizzazioni di sistema e del sistema operativo vengono applicate e misurate **DOPO** aver completato tutti gli step software in `ds4`:
