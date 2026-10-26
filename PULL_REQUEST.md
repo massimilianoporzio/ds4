@@ -1,10 +1,22 @@
 # PR: 10x Speedup for DeepSeek-V4 Streaming Inference on RTX 3090 (from 1.02 to 10.35–11.74 t/s) with 100% Bit-Exact Invariance and LMM Certification
 
-## Summary
+## Summary: Dual Contribution
 
-This PR optimizes streaming MoE inference for **DeepSeek-V4-Flash-IQ2XXS** (80.7 GiB) on a single **NVIDIA GeForce RTX 3090 (24 GB VRAM) + 64 GB host RAM**, bringing steady-state decode speed from the **1.02 token/s** baseline to **10.35–11.74 token/s** (a **10x speedup**, peaking at **11.82 token/s** on conversational prose).
+This PR provides two major contributions to DwarfStar:
 
-All changes are surgical, strictly adhere to DwarfStar's C99/CUDA design, maintain **100% bit-exact numerical invariance** (`max_abs_diff = 0.000000e+00`), and pass all official test suites (`make test`, `ds4-eval`, and 16K-context *I Promessi Sposi* sweeps).
+1. **A 10x Speedup for DeepSeek-V4-Flash Streaming on Consumer Hardware (RTX 3090 + 64 GB RAM)**:
+   - Takes steady-state decode throughput from the **1.02 token/s** baseline to **10.35–11.74 token/s** (peaking at **11.82 token/s** on conversational prose, and sustaining **5.2–5.5 token/s** even under heavy agentic workloads with 7,000+ active context tokens in `ds4-agent`).
+   - Surgical C/CUDA improvements: standardizing 1,510 VRAM cache slots with 4 GiB reserve, fusing Hyper-Connections kernels on Ampere (`sm_86`), non-blocking asynchronous stream flush & pinned remap, and decoupling Island A CUDA Graph replay during decode streaming.
+   - **100% Bit-Exact Invariance**: `max_abs_diff = 0.000000e+00` across all tokens, passing all official test suites (`make test`, `ds4-eval`, and 16K-context *I Promessi Sposi* sweeps).
+
+2. **A Rigorous Statistical Comparison & Metrology Framework for LLM Engines**:
+   - As a Medical Physicist by training, I wanted to address the chronic problem in open-source AI benchmarks: anecdotal comparisons, uncalibrated prompt variance, and the fallacy of assuming lack of proof of divergence equals proof of equivalence.
+   - Introduces a reusable metrology harness (`benchmarks/`):
+     - **Repeated Measures across 4 Domains** (Code, Math, Prose, Synthetic Teacher-Forced Decode) separating cold-start from warm steady state.
+     - **Linear Mixed-Effects Models (LMM via REML)** to isolate hardware/kernel speedups from prompt-to-prompt lexical variance.
+     - **Two One-Sided Tests (TOST)** for formal numerical equivalence testing.
+     - **Holm-Bonferroni FWER Adjustment** for rigorous multiple comparisons against baseline.
+     - **Okabe-Ito (2008) Palette**: universal colorblind-safe SVG vector plots with 95% Confidence Interval shaded bands.
 
 ---
 
