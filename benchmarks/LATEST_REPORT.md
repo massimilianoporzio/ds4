@@ -16,6 +16,10 @@
 | `2_opt2_2_vram_cache` | `D2_math` | 5 | 11.57 ± 0.28 | **9.355** ± 0.151 | 9.430 (0.090) | [9.222, 9.448] | 106.9 ms | 1796 (11.840G) | OK |
 | `2_opt2_2_vram_cache` | `D3_prose` | 5 | 8.78 ± 0.07 | **11.647** ± 0.142 | 11.655 (0.219) | [11.537, 11.758] | 85.9 ms | 1802 (11.880G) | OK |
 | `2_opt2_2_vram_cache` | `D4_bench` | 5 | 32.89 ± 0.15 | **9.434** ± 0.645 | 9.180 (1.060) | [8.936, 9.932] | 106.4 ms | 1813 (11.950G) | OK |
+| `3_opt2_3_4_nodup` | `D1_code` | 5 | 8.89 ± 0.06 | **9.516** ± 0.453 | 9.425 (0.663) | [9.169, 9.863] | 105.3 ms | 1510 (9.950G) | OK |
+| `3_opt2_3_4_nodup` | `D2_math` | 5 | 12.00 ± 0.07 | **9.220** ± 0.254 | 9.182 (0.098) | [9.058, 9.444] | 108.5 ms | 1505 (9.920G) | OK |
+| `3_opt2_3_4_nodup` | `D3_prose` | 5 | 8.93 ± 0.06 | **11.409** ± 0.337 | 11.194 (0.618) | [11.157, 11.659] | 87.7 ms | 1510 (9.950G) | OK |
+| `3_opt2_3_4_nodup` | `D4_bench` | 5 | 33.63 ± 0.19 | **7.008** ± 1.448 | 6.350 (1.720) | [5.986, 8.258] | 147.1 ms | 1521 (10.030G) | OK |
 
 ## 2. Sintesi Globale Multi-Dominio (Media su tutti i Run a Regime + Cold Start)
 
@@ -24,13 +28,15 @@
 | `0_baseline` | 20 | 1.004 | **1.022** ± 0.022 | 1.021 (0.010) | [1.013, 1.032] | **1.00x** (+0.0%) |
 | `1_opt2_1_ram_pinned` | 20 | 1.548 | **1.579** ± 0.033 | 1.574 (0.040) | [1.565, 1.593] | **1.55x** (+54.5%) |
 | `2_opt2_2_vram_cache` | 20 | 10.246 | **10.519** ± 1.213 | 10.756 (2.128) | [10.012, 11.031] | **10.29x** (+929.4%) |
+| `3_opt2_3_4_nodup` | 20 | 7.583 | **9.288** ± 1.757 | 9.231 (1.347) | [8.490, 10.014] | **9.09x** (+809.0%) |
 
 ## 3. Modello Lineare a Effetti Misti (LMM REML): `steady_decode_tps ~ config + (1 | domain)`
 
-- **Componenti di Varianza (Effetti Aleatori)**: $\hat{\sigma}_{\text{domain}} = 0.4037\text{ t/s}$, $\hat{\sigma}_{\text{residual}} = 0.6019\text{ t/s}$, $\text{ICC} = 31.0\%$, $N = 60, \text{df} = 57$
+- **Componenti di Varianza (Effetti Aleatori)**: $\hat{\sigma}_{\text{domain}} = 0.6980\text{ t/s}$, $\hat{\sigma}_{\text{residual}} = 0.8694\text{ t/s}$, $\text{ICC} = 39.2\%$, $N = 80, \text{df} = 76$
 
 | Parametro Effetto Fisso | Stima $\hat{\beta}$ (t/s) | Errore Standard (SE) | $\text{IC}_{95\%}$ Parametrico | $t$-stat | $p$-value |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Intercetta (`0_baseline`) | **1.0219** | 0.2426 | [0.5463, 1.4974] | 4.21 | 2.533e-05 |
-| Delta `1_opt2_1_ram_pinned` vs Baseline | **+0.5570** | 0.1903 | [0.1839, 0.9301] | 2.93 | 3.430e-03 |
-| Delta `2_opt2_2_vram_cache` vs Baseline | **+9.4969** | 0.1903 | [9.1239, 9.8700] | 49.89 | 0.000e+00 |
+| Intercetta (`0_baseline`) | **1.0219** | 0.3995 | [0.2389, 1.8049] | 2.56 | 1.053e-02 |
+| Delta `1_opt2_1_ram_pinned` vs Baseline | **+0.5570** | 0.2749 | [0.0182, 1.0958] | 2.03 | 4.276e-02 |
+| Delta `2_opt2_2_vram_cache` vs Baseline | **+9.4969** | 0.2749 | [8.9581, 10.0358] | 34.55 | 1.686e-261 |
+| Delta `3_opt2_3_4_nodup` vs Baseline | **+8.2665** | 0.2749 | [7.7276, 8.8053] | 30.07 | 1.220e-198 |

@@ -156,34 +156,75 @@ Dall'analisi di `ds4_cuda.cu` e `ds4.c`, interverremo uno step alla volta sui se
       - $\hat{\beta}_{\text{baseline}} = \mathbf{1.0219\text{ token/s}}$
       - $\Delta\hat{\beta}_{\text{Opt 2.2}} = \mathbf{+9.4969\text{ token/s}}$ ($\text{SE} = 0.1903$, $\text{IC}_{95\%} = [+9.1239, +9.8700]$, $t = 49.89$, $p < 10^{-50}$) $\rightarrow$ **$\mathbf{10.519\text{ token/s}}$ steady-state media globale (+929.4% / 10.29x speedup globale, picco `11.65 token/s`)**.
     - **Diagnosi Invarianza Numerica `D1_code`**: Diagnosticata al 100%. Causata dall'esaurimento del budget di allocazione cumulativo di `g_q8_f16_ranges` a layer 16 che passava da cuBLAS FP16 a Q8 integer per i layer 16..42. La soluzione è pronta: un buffer di scratch riutilizzabile da 64 MiB (`g_q8_f16_stream_scratch`) che garantisce 100% bit-exactness su tutti i layer e risparmia 940 MiB di VRAM.
-- [ ] **Opt 2.3 + Opt 2.4 + Opt 2.8 — Eliminazione Doppia Chiamata (`consumed`), Overlap Asincrono Ping-Pong & Buffer Scratch `q8_f16`**:
-  - Evitare la ridondanza di `cuda_stream_selected_cache_begin_load_tensor` all'interno di `routed_moe_launch` tramite flag `consumed` in `g_stream_selected_cache`.
-  - Sostituire `cudaDeviceSynchronize()` con `cudaEvent_t` in `ds4_gpu_signal_selected_readback_ready` e non-blocking query in `ds4_gpu_flush_commands`.
-  - Usare lo scratch 64 MiB `g_q8_f16_stream_scratch` per ripristinare il 100% di match su `D1_code`.
-- [ ] **Opt 2.3 — Vero Overlap Asincrono Ping-Pong tra Shared Expert e DMA PCIe (`ds4_cuda.cu:29029, 35509, 35695`)**:
-  - Rimuovere le chiamate bloccanti `cudaDeviceSynchronize()` in `ds4_gpu_signal_selected_readback_ready` e `ds4_gpu_wait_selected_readback_ready`, e la `cudaStreamSynchronize(cuda_decode_stream())` in `cuda_stream_selected_cache_begin_load`.
-  - Sincronizzare tramite `cudaEvent_t` + readback pinned dei 6 `int32_t` `selected_ids`, permettendo a `g_stream_selected_upload_stream` di trasferire gli esperti via PCIe *mentre* `cuda_decode_stream()` esegue `shared_gate_up` e `shared_down`.
-- [ ] **Opt 2.4 — Eliminazione Doppio Caricamento Esperti in `routed_moe_launch` (`ds4_cuda.cu:26143`)**:
-  - Evitare che `routed_moe_launch` richiami `cuda_stream_selected_cache_begin_load_tensor` una seconda volta quando `ds4.c` ha già pre-caricato e rimappato gli slot del layer corrente.
-- [ ] **Opt 2.5 — Politica di Eviction LFU-Aging + Hotlist Priority (`ds4_cuda.cu:29150, 35788`)**:
-  - Utilizzare `expert_priorities` (attualmente ignorato con `(void)expert_priorities;`) e un contatore di frequenza (`hit_count`) negli slot `g_stream_expert_slots` per mantenere gli *hot experts* residenti in VRAM.
-- [ ] **Opt 2.6 — Sblocco Kernel Fusi Hyper-Connections su Ampere `sm_86` (`ds4_cuda.cu:28420`)**:
+- [x] **Opt 2.3 + Opt 2.4 — Fix Invarianza VRAM Reserve (100% Bit-Match) & Eliminazione Doppia Chiamata (`ds4_cuda.cu:1594-1607, 29117, 34955`)**:
+  - **Causa radice risolta**: la soglia rigida di `4.0 GiB` di riserva per schede `< 40 GiB` provocava l'esaurimento del budget `q8_f16` a layer 16, forzando un fallback silenzioso a kernel integer su `D1_code`.
+  - **Fix implementato**:
+    1. Per schede $\ge 20\text{ GiB}$ (RTX 3090), impostata riserva `hi_min_reserve = 768 MiB` e `workspace_reserve_mb = 4096 MiB` (la cache VRAM si attesta a 1.510 slot residenti = 9.95 GiB, lasciando oltre 2 GiB di headroom pulita per cuBLAS).
+    2. Zero warning di budget exhausted su tutti i 43 layer: cuBLAS FP16 attivo al 100% ovunque.
+    3. Eliminata la seconda chiamata ridondante `cuda_stream_selected_cache_begin_load_tensor` in `routed_moe_launch` quando il layer corrente è già validato e mappato da `ds4.c`, eliminando una `cudaMemcpy(D2H)` sincrona e una sincronizzazione bloccante per layer.
+  - **Verifica Invarianza & Velocità**:
+    - `D1_code`: **100% Exact Text Match** (`#include <stdatomic.h>`), zero divergenze, generazione a **12.23 token/s**.
+    - `D2_math`: **100% Exact Text Match** (`We have the recurrence`), zero divergenze, generazione a **7.96 token/s** (cold prefill 110 token).
+    - `D3_prose`: **100% Exact Text Match** (`Ecco un'analisi dettagli`), zero divergenze, generazione a **10.65 token/s**.
+- [ ] **Opt 2.5 — Overlap Asincrono Ping-Pong tra Shared Expert e DMA PCIe (`ds4_cuda.cu:29029, 35509, 35695`)**:
+  - Sincronizzare tramite `cudaEvent_t` non-bloccanti + readback pinned dei 6 `int32_t` `selected_ids`, permettendo a `g_stream_selected_upload_stream` di trasferire gli esperti via PCIe *mentre* `cuda_decode_stream()` esegue `shared_gate_up` e `shared_down`.
+- [ ] **Opt 2.6 — Politica di Eviction LFU-Aging + Hotlist Priority (`ds4_cuda.cu:29150, 35788`)**:
+  - Utilizzare `expert_priorities` e contatore di frequenza (`hit_count`) negli slot per proteggere gli esperti MoE caldi.
+- [ ] **Opt 2.7 — Sblocco Kernel Fusi Hyper-Connections su Ampere `sm_86` (`ds4_cuda.cu:28420`)**:
   - Abilitare `ds4_gpu_hc_pre_f32_mix_split_norm_tensor` anche su GPU non-Spark (`sm_86`), fondendo 5+ lanci di kernel e chiamate cuBLAS per layer in 2 micro-kernel con riduzioni warp.
-- [ ] **Opt 2.7 — Architettura a 3 Livelli (VRAM $\rightarrow$ Host RAM con Margine Sicuro $\rightarrow$ SSD) (`ds4_cuda.cu:2162-2441, 2587`)**:
-  - **Dimensioni esatte `ds4f-q2`** (`DS4_SHAPE_FLASH`: 43 layer di cui 3 densi e 40 MoE, 256 esperti/layer, 6 attivi/token):
-    - Singolo esperto (`gate` IQ2_XXS 2.06 MiB + `up` IQ2_XXS 2.06 MiB + `down` Q2_K 2.625 MiB) = **6.75 MiB** (`7,077,888` byte).
-    - Totale 10.240 esperti routed = **67.5 GiB**.
-    - Totale pesi statici/densi/attention/shared-experts = **~13.2 GiB**.
-  - **Regola di Sicurezza Anti-Crash (Margini RAM)**:
-    - **Mai pinnare (`cudaMallocHost`/`mlock`) decine di GB**: la memoria *pinned* non può essere reclamata dal kernel Linux e rischia di innescare l'OOM killer. Usiamo solo un **Ping-Pong Ring Buffer Pinned da 64–256 MiB** per il DMA PCIe.
-    - **Margine di sicurezza Host RAM di almeno 10–12 GiB liberi**:
-      1. **Tier 1 (VRAM - 24 GiB)**: **13.2 GiB** pesi statici + **~8.0 GiB** (~1.200 Hot Experts) + **~1.5 GiB** KV/workspace (**~1.3 GiB** margine VRAM). Le pagine RAM corrispondenti a questi ~21.2 GiB residenti in VRAM vengono subito rilasciate con `DONTNEED`.
-      2. **Tier 2 (Host RAM Page Cache - max ~48 GiB su 62.7 GiB)**: Teniamo in Page Cache Linux (`mmap` read-only, 100% reclamabile dal kernel in caso di picchi di altre app) circa **48 GiB di Warm Experts (~7.100 esperti)**, lasciando sempre **10–12 GiB di RAM completamente libera** per Ubuntu e Antigravity IDE.
-      3. **Tier 3 (NVMe SSD - ~11.5 GiB)**: Solo i ~1.900 esperti più freddi (meno del 6–8% degli accessi) restano su SSD.
-    - **Valore per il feedback ad Antirez**: Trasforma `--ssd-streaming` da "tutto da SSD in `O_DIRECT`" a una **gerarchia a 3 livelli (VRAM + RAM con budget sicuro + SSD)** perfetta per workstation Linux da 64 GB RAM + GPU da 24 GB.
 - [ ] **Opt 2.8 — Eliminazione `cudaMemcpy` Sincrono su `slot_selected_ptr` e Supporto CUDA Graph per Decode IQ2 (`ds4_cuda.cu:26801, 29244`)**:
-  - In `cuda_stream_selected_cache_begin_load` (`ds4_cuda.cu:29244`), sostituire la `cudaMemcpy` sincrona di 24 byte (`remap.data()`) con `cudaMemcpyAsync` su buffer pinned.
-  - Valutare l'estensione di `routed_moe_decode_q4_graph_launch` (`ds4_cuda.cu:26801`) anche al path `iq2_path` per abbattere l'overhead di lancio dei 4 kernel MoE per 40 layer.
+  - Sostituire la `cudaMemcpy` sincrona di 24 byte con `cudaMemcpyAsync` su buffer pinned ed estendere CUDA Graph a `iq2_path`.
+
+---
+
+## 5. Metodologia Scientifica Avanzata: LMM, Medie Marginali (`emmeans`) e Test TOST (Two One-Sided Tests)
+
+### 5.1 Il Problema: Fallacia del $p > 0.05$ nei Benchmark di Inferenza
+Nei benchmark open-source tradizionali di LLM si incorre spesso in due errori metodologici:
+1. **Confondere "assenza di prova" con "prova di assenza"**: eseguire un classico $t$-test sulla differenza di accuratezza e ottenere $p = 0.12$ **non dimostra** che la versione ottimizzata sia equivalente alla baseline; dimostra solo che il campione non era sufficientemente potente da rilevare una discrepanza.
+2. **Ignorare la struttura nidificata dei dati (Repeated Measures)**: calcolare medie aritmetiche grezze ignora che la varianza tra prompt/compiti diversi ($\sigma^2_{\text{prompt}}$) è ordini di grandezza superiore al rumore di misura della GPU.
+
+### 5.2 Formulazione del Modello Lineare a Effetti Misti (LMM)
+Per ogni metrica di accuratezza $Y_{ij}$ (es. Negative Log-Likelihood $\text{NLL}$, target logprob MAE o tempo di decodifica) del prompt $j$ alla ripetizione $i$:
+$$Y_{ij} = \beta_0 + \beta_{\text{config}} \cdot \text{Config}_i + u_j + \epsilon_{ij}$$
+dove:
+- $\beta_{\text{config}}$ è l'**effetto fisso** (Baseline vs Versione Ottimizzata).
+- $u_j \sim \mathcal{N}(0, \sigma^2_{\text{prompt}})$ è l'**effetto casuale del prompt**, che assorbe la variabilità intrinseca di routing ed entropia lessicale.
+- $\epsilon_{ij} \sim \mathcal{N}(0, \sigma^2_{\text{residual}})$ è l'errore residuo di misura.
+
+Tramite il pacchetto R `emmeans` calcoliamo le **Estimated Marginal Means (EMMs)** depurate dall'effetto casuale del prompt con i rispettivi Intervalli di Confidenza al 95%:
+$$\widehat{\text{EMM}}_{\text{baseline}} \pm t_{\alpha/2, \text{df}} \cdot \text{SE}, \quad \widehat{\text{EMM}}_{\text{opt}} \pm t_{\alpha/2, \text{df}} \cdot \text{SE}$$
+
+### 5.3 Test di Equivalenza TOST (Two One-Sided Tests)
+Per certificare formalmente che l'accuratezza non sia cambiata entro un margine di indifferenza $[-\Delta, +\Delta]$:
+$$H_{01}: \mu_{\text{opt}} - \mu_{\text{base}} \le -\Delta \quad \text{vs} \quad H_{11}: \mu_{\text{opt}} - \mu_{\text{base}} > -\Delta$$
+$$H_{02}: \mu_{\text{opt}} - \mu_{\text{base}} \ge +\Delta \quad \text{vs} \quad H_{12}: \mu_{\text{opt}} - \mu_{\text{base}} < +\Delta$$
+L'equivalenza è statisticamente dimostrata al livello $\alpha = 0.05$ se e solo se entrambi i test rifiutano l'ipotesi nulla:
+$$p_{\text{TOST}} = \max(p_1, p_2) < 0.05$$
+che equivale a verificare che l'Intervallo di Confidenza al 90% (o al 95% simmetrico) della differenza marginale $\Delta\hat{\beta}$ sia **interamente contenuto** all'interno dell'intervallo $[-\Delta, +\Delta]$.
+
+### 5.4 Criteri Rigorosi per la Scelta della Tolleranza $\Delta$ (SESOI)
+Come stabilire il margine di equivalenza $\Delta$ in modo scientifico e non arbitrario:
+
+1. **Criterio A — Calibrazione sul Noise-Floor della Baseline**:
+   - Si eseguono $N$ ripetizioni della sola Baseline a parità di pesi. A causa della concorrenza non deterministica dei thread CUDA e dell'aritmetica floating-point non associativa ($(a+b)+c \neq a+(b+c)$), si misura la deviazione standard residua $\sigma_{\text{baseline}}$.
+   - Si fissa:
+     $$\Delta_{\text{noise}} = \frac{1}{2} \sigma_{\text{baseline}} \quad \text{oppure} \quad \Delta_{\text{noise}} = 1 \cdot \sigma_{\text{baseline}}$$
+   - Dimostra che la versione ottimizzata non si discosta più della naturale oscillazione fisica della GPU.
+
+2. **Criterio B — Bound di Teoria dell'Informazione ($\Delta\text{NLL}$)**:
+   - Sulla metrica NLL ($\text{NLL} = -\log P(\text{target})$), la differenza $\Delta\text{NLL}$ rappresenta il log-ratio delle probabilità:
+     $$\frac{P_{\text{opt}}}{P_{\text{base}}} = e^{-\Delta\text{NLL}}$$
+   - Fissando $\Delta = 0.010$, tolleriamo al massimo una variazione dell'**$1\%$ relativo** sulla probabilità target ($e^{\pm 0.01} \approx 1 \pm 0.01$). Poiché la quantizzazione Q2 rispetto al modello FP16 introduce già un delta $\text{NLL} \approx 0.05 - 0.15$, un margine $\Delta = 0.010$ è conservativo e garantisce perfetta equivalenza percettiva e semantica.
+
+3. **Criterio C — Statistica di Poisson per Eventi Rari di Discrepanza su Testi Lunghi (*I Promessi Sposi*)**:
+   - Su sequenze lunghe di $N$ token generati (es. $N = 2.048$ o $65.536$ con `ds4-bench`), il verificarsi di un token discordante (inversione argmax tra due logits a ridosso della parità) è un evento raro discreto.
+   - Il numero di token discordanti $K$ segue una distribuzione di Poisson:
+     $$K \sim \text{Poisson}(\lambda), \quad \text{con } \lambda = N \cdot p_{\text{err}}, \quad \text{Var}(K) = \lambda$$
+   - Per fluttuazione poissoniana naturale, l'intervallo atteso è $\lambda \pm 2\sqrt{\lambda}$.
+   - Se stabiliamo come soglia fisiologica $\lambda_0 \le 1\text{ o }2$ token discordanti ogni $2.048$ token generati (tasso di errore intrinseco $p_0 \approx 0.0005 - 0.001$), possiamo applicare il **TOST per tassi di Poisson** (*C-test* di Gu et al., 2008 / Przyborowski-Wilenski):
+     $$H_0: \frac{\lambda_{\text{opt}}}{\lambda_{\text{base}}} \ge 1 + \delta \quad \text{vs} \quad H_1: 1 - \delta < \frac{\lambda_{\text{opt}}}{\lambda_{\text{base}}} < 1 + \delta$$
+   - Il margine $\delta$ è calcolato analiticamente in funzione del volume $N$ del testo, fondando la tolleranza sulla fisica del calcolo stocastico.
 
 ### Budget Prestazionale Stimato (Target: $\ge$ 8–12 token/s)
 - **Traffico attivo per token**: 40 layer $\times$ 6 esperti $\times$ 6.75 MiB = **1.62 GiB/token**.

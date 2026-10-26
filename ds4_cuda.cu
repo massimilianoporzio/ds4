@@ -1591,9 +1591,9 @@ static uint64_t cuda_q8_f16_cache_reserve_bytes(uint64_t total_bytes) {
      * free VRAM is verified by measurement, and the disable-after-failure path
      * degrades gracefully if cuBLAS/alloc ever fails under pressure.  Set
      * DS4_CUDA_Q8_F16_CACHE_RESERVE_MB=4096 to restore the prior behavior. */
-    if (total_bytes >= 40ull * 1024ull * 1024ull * 1024ull) {
+    if (total_bytes >= 20ull * 1024ull * 1024ull * 1024ull) {
         const uint64_t hi_min_reserve = 768ull * 1048576ull;
-        const uint64_t hi_pct_reserve = total_bytes / 100u; /* 1% */
+        const uint64_t hi_pct_reserve = total_bytes / 50u; /* 2% */
         return hi_pct_reserve > hi_min_reserve ? hi_pct_reserve : hi_min_reserve;
     }
 
@@ -29114,7 +29114,7 @@ static int cuda_stream_selected_cache_begin_load(
             const uint64_t expected_static_arenas = UINT64_C(8960) << 20;
             const uint64_t unloaded_static = (!integrated && arena_bytes < expected_static_arenas) ?
                 (expected_static_arenas - arena_bytes) : 0;
-            uint64_t workspace_reserve_mb = 2048;
+            uint64_t workspace_reserve_mb = 4096;
             if (const char *env_res = getenv("DS4_CUDA_STREAMING_VRAM_RESERVE_MB")) {
                 char *end = NULL;
                 unsigned long long v = strtoull(env_res, &end, 10);
@@ -34956,6 +34956,12 @@ static int cuda_stream_selected_cache_begin_load_tensor(
     if (!table || !selected || n_selected == 0 ||
         selected->bytes < (uint64_t)n_selected * sizeof(int32_t)) {
         return 0;
+    }
+    const auto &c = g_stream_selected_cache;
+    if (c.valid && c.model_map == table->model_map &&
+        c.layer == table->layer && c.slot_count == n_selected &&
+        c.gate_offset == table->gate_offset) {
+        return 1;
     }
     std::vector<int32_t> ids;
     try {
