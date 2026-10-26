@@ -178,6 +178,11 @@ typedef struct {
     uint64_t prefill_capacity;
 } cuda_stream_selected_cache;
 
+static cudaStream_t g_stream_selected_upload_stream;
+static cudaEvent_t g_stream_selected_upload_done_event = NULL;
+static bool g_stream_selected_upload_event_pending = false;
+static void cuda_stream_selected_wait_upload_ready(void);
+
 static cuda_stream_selected_cache g_stream_selected_cache;
 static uint32_t g_stream_expert_budget;
 static uint64_t g_stream_expert_bytes;
@@ -202,6 +207,10 @@ static void cuda_stream_selected_cache_invalidate(void) {
 }
 
 static void cuda_stream_selected_cache_release(void) {
+    cuda_stream_selected_wait_upload_ready();
+    if (g_stream_selected_upload_stream) {
+        (void)cudaStreamSynchronize(g_stream_selected_upload_stream);
+    }
     ds4_gpu_stream_expert_cache_prefetch_finish(true);
     const int tier = g_stream_selected_cache.logical_tier;
     if (tier >= 0 && tier < g_n_gpus) {
@@ -547,7 +556,6 @@ static void *g_stream_selected_stage_raw[DS4_STREAM_SELECTED_STAGE_SLOTS];
 static void *g_stream_selected_stage[DS4_STREAM_SELECTED_STAGE_SLOTS];
 static cudaEvent_t g_stream_selected_stage_event[DS4_STREAM_SELECTED_STAGE_SLOTS];
 static uint64_t g_stream_selected_stage_bytes;
-static cudaStream_t g_stream_selected_upload_stream;
 
 static int cuda_ok(cudaError_t err, const char *what);
 extern "C" void ds4_gpu_decode_graphs_invalidate(void);
@@ -2345,6 +2353,11 @@ static void cuda_stream_selected_stage_release(void) {
         }
     }
     g_stream_selected_stage_bytes = 0;
+    if (g_stream_selected_upload_done_event) {
+        (void)cudaEventDestroy(g_stream_selected_upload_done_event);
+        g_stream_selected_upload_done_event = NULL;
+    }
+    g_stream_selected_upload_event_pending = false;
     if (g_stream_selected_upload_stream) {
         (void)cudaStreamDestroy(g_stream_selected_upload_stream);
         g_stream_selected_upload_stream = NULL;
@@ -26186,6 +26199,7 @@ static int routed_moe_launch(
                 &table, selected, n_tokens * n_expert, n_tokens > 1)) return 0;
         allow_streaming = 1;
     }
+    cuda_stream_selected_wait_upload_ready();
 
     /* The aligned artifacts replace the raw expert tensors on integrated
      * CUDA systems.  Route both prefill and decode before resolving a raw
@@ -29037,7 +29051,18 @@ struct cuda_stream_upload_batch {
     int finish() {
         if (!active) return 1;
         active = false;
-        if (!g_stream_selected_upload_stream || cuda_ok(
+        if (!g_stream_selected_upload_stream) return 1;
+        if (!g_stream_selected_upload_done_event) {
+            (void)cudaEventCreateWithFlags(&g_stream_selected_upload_done_event, cudaEventDisableTiming);
+        }
+        if (g_stream_selected_upload_done_event) {
+            cudaError_t err = cudaEventRecord(g_stream_selected_upload_done_event, g_stream_selected_upload_stream);
+            if (err == cudaSuccess) {
+                g_stream_selected_upload_event_pending = true;
+                return 1;
+            }
+        }
+        if (cuda_ok(
                 cudaStreamSynchronize(g_stream_selected_upload_stream), "stream expert batch upload"))
             return 1;
         /* A failed asynchronous copy must not turn into a cache hit later. */
@@ -29048,6 +29073,13 @@ struct cuda_stream_upload_batch {
     }
     ~cuda_stream_upload_batch() { (void)finish(); }
 };
+
+static void cuda_stream_selected_wait_upload_ready(void) {
+    if (g_stream_selected_upload_event_pending && g_stream_selected_upload_done_event) {
+        (void)cudaStreamWaitEvent(cuda_decode_stream(), g_stream_selected_upload_done_event, 0);
+        g_stream_selected_upload_event_pending = false;
+    }
+}
 
 static int cuda_stream_selected_cache_begin_load(
         const ds4_gpu_stream_expert_table *table,
