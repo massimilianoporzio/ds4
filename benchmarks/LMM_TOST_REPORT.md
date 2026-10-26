@@ -1,27 +1,31 @@
 # Certificazione Statistica LMM & Test TOST (`rtx3090-opt`)
 
-- **Data Esecuzione**: 2026-10-26 17:33:36.392179
+- **Data Esecuzione**: 2026-10-26 22:20:44.892097
 
 ## 1. Stime delle Medie Marginali (EMMs da modello LMM REML)
 
 | Configurazione | EMM Steady Decode (t/s) | SE | IC 95% Parametrico | Latenza Token (ms) | Speedup vs Baseline |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| `0_baseline` | **1.022** ± 0.481 | 0.4807 | [0.069, 1.974] | 978.6 ms | **1.00x** (+0.0%) |
-| `1_opt2_1_ram_pinned` | **1.579** ± 0.481 | 0.4807 | [0.626, 2.531] | 633.4 ms | **1.55x** (+54.5%) |
-| `2_opt2_2_vram_cache` | **10.519** ± 0.481 | 0.4807 | [9.566, 11.471] | 95.1 ms | **10.29x** (+929.4%) |
-| `3_opt2_3_4_nodup` | **9.288** ± 0.481 | 0.4807 | [8.336, 10.241] | 107.7 ms | **9.09x** (+809.0%) |
-| `4_opt2_5_async_overlap` | **8.799** ± 0.481 | 0.4807 | [7.847, 9.752] | 113.6 ms | **8.61x** (+761.1%) |
-| `5_opt2_5_6_fused` | **9.461** ± 0.481 | 0.4807 | [8.509, 10.414] | 105.7 ms | **9.26x** (+825.9%) |
+| `0_baseline` | **1.022** ± 0.482 | 0.4824 | [0.069, 1.975] | 978.6 ms | **1.00x** (+0.0%) |
+| `1_opt2_1_ram_pinned` | **1.579** ± 0.482 | 0.4824 | [0.626, 2.532] | 633.4 ms | **1.55x** (+54.5%) |
+| `2_opt2_2_vram_cache` | **10.519** ± 0.482 | 0.4824 | [9.566, 11.472] | 95.1 ms | **10.29x** (+929.4%) |
+| `3_opt2_3_4_nodup` | **9.288** ± 0.482 | 0.4824 | [8.335, 10.241] | 107.7 ms | **9.09x** (+809.0%) |
+| `4_opt2_5_async_overlap` | **8.799** ± 0.482 | 0.4824 | [7.846, 9.752] | 113.6 ms | **8.61x** (+761.1%) |
+| `5_opt2_5_6_fused` | **9.461** ± 0.482 | 0.4824 | [8.508, 10.414] | 105.7 ms | **9.26x** (+825.9%) |
+| `6_opt2_8_async_flush` | **10.346** ± 0.482 | 0.4824 | [9.393, 11.299] | 96.7 ms | **10.12x** (+912.5%) |
+| `7_opt2_9_cuda_graphs` | **10.178** ± 0.482 | 0.4824 | [9.225, 11.131] | 98.3 ms | **9.96x** (+896.0%) |
 
 ## 2. Contrasti Parametrici di Velocità vs `0_baseline`
 
 | Configurazione | Delta $\hat{\beta}$ (t/s) | SE | IC 95% Delta | $t$-stat | $p$-value (Superiorità) | Conclusione Statistica |
 | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
-| `1_opt2_1_ram_pinned` | **+0.5570** | 0.2632 | [+0.0355, +1.0784] | 2.12 | `0.018263` | **p = 0.0183** |
-| `2_opt2_2_vram_cache` | **+9.4969** | 0.2632 | [+8.9755, +10.0184] | 36.09 | `< 1e-16` | **Significativo (p < 0.0001)** |
-| `3_opt2_3_4_nodup` | **+8.2665** | 0.2632 | [+7.7450, +8.7879] | 31.41 | `< 1e-16` | **Significativo (p < 0.0001)** |
-| `4_opt2_5_async_overlap` | **+7.7774** | 0.2632 | [+7.2560, +8.2989] | 29.56 | `< 1e-16` | **Significativo (p < 0.0001)** |
-| `5_opt2_5_6_fused` | **+8.4393** | 0.2632 | [+7.9178, +8.9607] | 32.07 | `< 1e-16` | **Significativo (p < 0.0001)** |
+| `1_opt2_1_ram_pinned` | **+0.5570** | 0.2476 | [+0.0678, +1.0462] | 2.25 | `0.012958` | **p = 0.0130** |
+| `2_opt2_2_vram_cache` | **+9.4969** | 0.2476 | [+9.0078, +9.9861] | 38.36 | `< 1e-16` | **Significativo (p < 0.0001)** |
+| `3_opt2_3_4_nodup` | **+8.2665** | 0.2476 | [+7.7773, +8.7557] | 33.39 | `< 1e-16` | **Significativo (p < 0.0001)** |
+| `4_opt2_5_async_overlap` | **+7.7774** | 0.2476 | [+7.2883, +8.2666] | 31.42 | `< 1e-16` | **Significativo (p < 0.0001)** |
+| `5_opt2_5_6_fused` | **+8.4393** | 0.2476 | [+7.9501, +8.9284] | 34.09 | `< 1e-16` | **Significativo (p < 0.0001)** |
+| `6_opt2_8_async_flush` | **+9.3242** | 0.2476 | [+8.8350, +9.8134] | 37.66 | `< 1e-16` | **Significativo (p < 0.0001)** |
+| `7_opt2_9_cuda_graphs` | **+9.1562** | 0.2476 | [+8.6671, +9.6454] | 36.99 | `< 1e-16` | **Significativo (p < 0.0001)** |
 
 ## 3. Verifica di Invarianza Numerica & Accuratezza
 
@@ -33,6 +37,8 @@
 | `3_opt2_3_4_nodup` | 20 warm | 100.0% | SI (max_abs_diff = 0.0) | **CONFERMATO (100% Identico)** |
 | `4_opt2_5_async_overlap` | 20 warm | 100.0% | SI (max_abs_diff = 0.0) | **CONFERMATO (100% Identico)** |
 | `5_opt2_5_6_fused` | 20 warm | 100.0% | SI (max_abs_diff = 0.0) | **CONFERMATO (100% Identico)** |
+| `6_opt2_8_async_flush` | 20 warm | 100.0% | SI (max_abs_diff = 0.0) | **CONFERMATO (100% Identico)** |
+| `7_opt2_9_cuda_graphs` | 20 warm | 100.0% | SI (max_abs_diff = 0.0) | **CONFERMATO (100% Identico)** |
 
 ### Conclusione Metodologica
 - L'implementazione attuale `3_opt2_3_4_nodup` ha ripristinato il **100% di identità esatta** rispetto alla baseline su tutti i domini (`match = 100%`, `max_abs_diff = 0.000000e+00`).
